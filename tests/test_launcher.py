@@ -62,3 +62,21 @@ def test_the_windows_launcher_has_the_same_guard():
     # `if not exist` before the exec lines: same ordering the POSIX launcher needs.
     assert text.index("if not exist") < text.index("viewer\\serve.py")
     assert "uv venv" in text and "install.ps1" in text
+
+
+def test_the_windows_launcher_keeps_its_windows_line_endings():
+    """`cmd` reads a batch file line by line; LF-only makes it misbehave, and
+    `.gitattributes` says `eol=crlf` for this file.
+
+    Editing it with an ordinary text write put LF on disk and broke the Windows launcher,
+    which no Mac-side test would have caught. This catches it on any machine.
+    """
+    data = (REPO / "lab.cmd").read_bytes()
+    assert b"\r\n" in data
+    assert b"\n" not in data.replace(b"\r\n", b""), "lab.cmd has a bare LF; it must be CRLF"
+
+
+def test_the_shell_launcher_stays_unix():
+    """The reverse mistake: CRLF in a `#!/bin/sh` script stops it running at all."""
+    data = (REPO / "lab").read_bytes()
+    assert b"\r\n" not in data, "./lab must use LF line endings"
