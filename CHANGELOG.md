@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`./lab` says what is wrong when the repo was cloned instead of installed.** Cloning with
+  git or `gh` skips `install.sh`, which is what builds `.venv`, so the first run died with
+  `cannot execute: No such file or directory` — a raw path error from the one script whose
+  job is to start the app. It now names the missing environment and gives both ways to fix
+  it. `lab.cmd` has the same guard on Windows.
+
 ### Added
 - **Hi3D 1.0 as a seventh backend.** Refines a coarse mesh against a picture at up to an
   effective 1536³, which is the sharpest detail of any route here. It is not an

@@ -4,8 +4,29 @@
 # prints the pod's link; over SSH it prints the tunnel command). See viewer/serve.py --auto.
 #   ./lab mcp    runs the MCP server an agent (Claude Code, Codex, ...) connects to
 cd "$(dirname "$0")" || exit 1
+
+# A clone is not an install. `install.sh` builds `.venv` and is what the download page tells
+# people to run; cloning the repo with git or `gh` skips it, and the bare `exec` below then
+# failed with "cannot execute: No such file or directory" -- a message about a path nobody
+# recognises, from a script whose whole job is to start the app. Say what is missing and
+# what to run instead.
+PY=".venv/bin/python"
+if [ ! -x "$PY" ]; then
+  echo "The lab's Python environment is missing (.venv/bin/python)." >&2
+  echo "" >&2
+  echo "If you cloned this repo instead of running the installer, set it up with:" >&2
+  echo "" >&2
+  echo "    uv venv --python 3.11 .venv" >&2
+  echo "    uv pip install --python .venv/bin/python -r requirements.lock" >&2
+  echo "" >&2
+  echo "or run the installer, which does that and the machine checks for you:" >&2
+  echo "" >&2
+  echo "    curl -fsSL https://assetfurnace.com/install.sh | bash" >&2
+  exit 1
+fi
+
 if [ "$1" = "mcp" ]; then
   shift
-  exec .venv/bin/python -m image_to_3dlab.mcp_server "$@"
+  exec "$PY" -m image_to_3dlab.mcp_server "$@"
 fi
-exec .venv/bin/python viewer/serve.py --auto "$@"
+exec "$PY" viewer/serve.py --auto "$@"
