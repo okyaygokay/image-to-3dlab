@@ -34,6 +34,7 @@ game-ready LODs), start with [the prop sheet guide](../docs/prop-sheets.md).
 | `bootstrap_trellis_space_macos.py` | Bootstrap TRELLIS.2 on macOS from Microsoft's pinned Space source. |
 | `bootstrap_trellis_cuda.py` | Install TRELLIS.2 for Linux with an NVIDIA card: Microsoft's own code, built for CUDA. |
 | `bootstrap_hunyuan_cuda.py` | Install Hunyuan3D-2.1 for Linux with an NVIDIA card: Tencent's own code, built for CUDA. |
+| `bootstrap_hi3d.py` | Install Hi3D v1.0 for Linux with an NVIDIA card: high-resolution mesh refinement. |
 | `bootstrap_hunyuan_rocm.py` | Install Hunyuan3D-2.1 for Linux with an AMD card: Tencent's own code, built with HIP. |
 | `bootstrap_trellis_rocm.py` | Install TRELLIS.2 for Linux with an AMD card: Microsoft's own code, built with HIP. |
 | `bootstrap_sf3d.py` | Install Stable Fast 3D: its code and compiled extensions, then its gated weights. |
@@ -57,6 +58,9 @@ game-ready LODs), start with [the prop sheet guide](../docs/prop-sheets.md).
 | `trellis_rocm_generate.py` | Full image -> GLB generation through Microsoft's own TRELLIS.2 on an AMD card. |
 | `trellis_route.py` | What differs between the TRELLIS.2 routes, in one place, so the two cannot drift. |
 | `hunyuan_cuda_generate.py` | Full image -> textured GLB through Tencent's own Hunyuan3D-2.1 on an NVIDIA card. |
+| `colab_generate.py` | Run one backend on a rented Colab GPU and bring the GLB back. |
+| `colab_supervisor.py` | Wait for one detached job on the Colab VM and record how it ended. |
+| `hi3d_generate.py` | Image -> refined GLB through Hi3D v1.0, on an NVIDIA card. |
 | `hunyuan_rocm_generate.py` | Full image -> textured GLB through Tencent's own Hunyuan3D-2.1 on an AMD card. |
 | `hunyuan_mlx_generate.py` | End-to-end Hunyuan3D-MLX generation: image -> textured GLB. |
 | `hunyuan_mlx_xiong_generate.py` | End-to-end, single-repo Hunyuan3D-MLX generation: image -> textured GLB. |

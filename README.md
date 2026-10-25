@@ -131,7 +131,7 @@ What you ask for decides most of the result: see [picking a picture](docs/prompt
 
 Built with Qwen. The pictures you make are yours ([Qwen's statement](https://x.com/QwenDevs/status/2101917379785838660)).
 
-Six backends, one studio. Sadly life is full of trade-offs, so pick the tradeoff you want (lol):
+Seven backends, one studio. Sadly life is full of trade-offs, so pick the tradeoff you want (lol):
 
 | Backend | Best for | Runs on | Setup | License |
 |---|---|---|---|---|
@@ -140,10 +140,15 @@ Six backends, one studio. Sadly life is full of trade-offs, so pick the tradeoff
 | **Hunyuan3D-MLX (dgrauet shape + Xiong paint)** | The cleanest shapes, at the cost of manual setup | Mac (NVIDIA: the row below) | Cloned separately, manual | Tencent Community License (code + weights) |
 | **Hunyuan3D-2.1 (NVIDIA)** | Tencent's own shape + PBR paint, one run | NVIDIA (Linux; not Windows yet), 24 GB+ | Setup & Status, or `scripts/bootstrap_hunyuan_cuda.py` (~19.5 GB weights) | Tencent Community License (code + weights) |
 | **TRELLIS.2** | Highest fidelity, closest to the official demo | Mac, NVIDIA (Linux; not Windows yet) | Setup & Status (~1h), or `scripts/bootstrap_trellis_cuda.py` on NVIDIA (~15 GB weights) | MIT + DINOv3 License |
+| **Hi3D 1.0** | Sharpest detail on a mesh that already looks right: refines a coarse mesh at up to 1536³ | NVIDIA (Linux; not Windows yet), compute capability 8.0+ | Setup & Status, or `scripts/bootstrap_hi3d.py` (~14.7 GB weights) | Hi3D Open License 1.0 (branding + scale threshold) |
 | **Stable Fast 3D** | Fastest, lower fidelity | Mac | Setup & Status, or `scripts/bootstrap_sf3d.py` (gated weights) | Stability AI Community License |
+| **Hi3D 1.0 (Colab GPU)** | The Hi3D result on a rented GPU: no NVIDIA card needed here | Any machine with the `colab` CLI signed in | Setup & Status, then Create (~15 GB on the VM, not here) | Hi3D Open License 1.0 + Tencent's coarse stage |
+| **Hunyuan3D-2.1 (Colab GPU)** | Tencent's own shape + PBR paint, rented | Any machine with the `colab` CLI signed in | Setup & Status, then Create | Tencent Community License |
+| **TRELLIS.2 (Colab GPU)** | TRELLIS fidelity without a Mac build | Any machine with the `colab` CLI signed in | Setup & Status, then Create (DINOv3 access needed) | MIT + DINOv3 License |
 
-⭐ Start with **Pixal3D**. It keeps flat, saturated colours in a single pass, where
-TRELLIS.2 often needs a separate repaint.
+⭐ Start with **a Colab GPU route** if this machine has no NVIDIA card: it needs no install
+here at all. With a card, **Pixal3D** — it keeps flat, saturated colours in a single pass,
+where TRELLIS.2 often needs a separate repaint.
 
 TRELLIS.2 and Hunyuan3D are built for NVIDIA upstream. On a Mac this lab runs their Apple
 Silicon ports; on Linux + NVIDIA it runs Microsoft's and Tencent's own code.
@@ -409,6 +414,12 @@ On a Mac, TRELLIS.2 runs about twice as fast with **Attention backend** set to `
 - **Hunyuan3D-2 / 2.1 model weights** (used by both Hunyuan3D-MLX backends): Tencent
   Hunyuan Community License; **not licensed for use in the EU, UK, or South Korea**;
   verify exact terms per model before any redistribution-sensitive use.
+- **Hi3D 1.0** (refinement): Hi3D Open License 1.0. Commercial use is permitted, but a
+  commercial product integrating it must display **"Powered by Hi3D 1.0"** (linking to
+  <https://hi3d.ai/> where the display supports a link), and exceeding **200,000 monthly
+  active users or USD 1,000,000 monthly revenue** requires a separate written licence
+  within 60 days. It refines a **Hunyuan3D-2 mini** coarse mesh, so it inherits that
+  model's territorial restriction and its output is classified `commercial-conditional`.
 - **Hunyuan3D-MLX (Xiong, full pipeline) code**: MIT, tracked in this repo at
   `hunyuan_mlx/`, safe to clone and modify freely (weights are the license-restricted
   part, downloaded separately).

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Hi3D 1.0 as a seventh backend.** Refines a coarse mesh against a picture at up to an
+  effective 1536³, which is the sharpest detail of any route here. It is not an
+  image-to-mesh model, so the studio and the CLI run Hunyuan3D-2 mini's turbo variant
+  first (or take `--coarse-mesh`). NVIDIA only, compute capability 8.0+, its own venv.
+  See [docs/hi3d.md](docs/hi3d.md).
+  - Its published stack (torch 2.5.0+cu124, spconv-cu120) cannot run on Blackwell cards,
+    so the installer pins torch 2.9.1+cu128 and spconv-cu126 instead — verified on a live
+    RTX PRO 6000.
+  - Its licence is `commercial-conditional`: a commercial product must display
+    "Powered by Hi3D 1.0", and 200k monthly users or USD 1M monthly revenue needs a
+    separate licence. The coarse stage's Hunyuan weights are territory-restricted, so a
+    `game`/`worldwide` run is refused by the licence gate.
+- **Rented Google Colab GPUs as first-class engines.** Hi3D, Hunyuan3D-2.1 and TRELLIS.2
+  run on a Colab VM from a Mac with no NVIDIA card. `scripts/colab_generate.py` rents the
+  GPU, installs out there, runs the same wrapper, and streams the same stage lines, so the
+  job runner needs no new path. `colab-hi3d`, `colab-hunyuan` and `colab-trellis` appear in
+  Create's engine picker and in Setup & Status, ready as soon as the `colab` CLI is signed
+  in and without a single model byte on this disk. See
+  [docs/colab-gpu.md](docs/colab-gpu.md).
+  - Warm sessions are reused, so a second job starts in seconds instead of paying a
+    15-30 minute install per click; idle ones are reaped at the start of each job.
+  - Create gains GPU and Detail pickers for these routes, and says in words that the run
+    costs compute units on someone else's hardware.
+  - `scripts/colab_supervisor.py` waits for the detached job, so a crash is reported as a
+    crash rather than looking like a hang forever.
+
 ## [0.5.2] - 2026-10-25
 
 ### Added

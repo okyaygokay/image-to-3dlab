@@ -39,6 +39,10 @@ MATTE_LICENSES = {
     "u2net": "MIT code / Apache-2.0 U-2-Net",
 }
 
+#: Hi3D's licence requires this exact wording in any commercial product that integrates
+#: it. Kept as a constant so the sidecar, the docs and the studio cannot drift apart.
+HI3D_BRANDING = 'Powered by Hi3D 1.0'
+
 LICENSES = {
     "sf3d": LicenseProfile(
         classification="commercial-conditional",
@@ -48,6 +52,24 @@ LICENSES = {
         conditions=(
             "Commercial registration required.",
             "Enterprise license required at or above the applicable annual-revenue threshold.",
+        ),
+    ),
+    # Hi3D is commercial-conditional rather than clear: commercial use is permitted, but
+    # the branding and the scale threshold are real obligations a user has to be told
+    # about before they ship anything made with it.
+    "hi3d": LicenseProfile(
+        classification="commercial-conditional",
+        folder="conditional",
+        license_name="Hi3D Open License Agreement 1.0",
+        license_url="https://github.com/hi3d-official/Hi3Dv1.0/blob/main/LICENSE",
+        conditions=(
+            (f"Commercial integrations must display \"{HI3D_BRANDING}\" and link to "
+             "https://hi3d.ai/ where the display supports a link."),
+            ("A separate written licence is required within 60 days of exceeding 200,000 "
+             "monthly active users or USD 1,000,000 monthly revenue."),
+            ("Refined outputs contain no Hi3D materials and are yours, but the coarse mesh "
+             "comes from Hunyuan3D-2 mini, whose licence is separate and "
+             "territory-restricted."),
         ),
     ),
     "hunyuan-comfyui": LicenseProfile(
@@ -144,6 +166,18 @@ def validate_run_policy(
     ):
         raise ValueError(
             "Hunyuan outputs are not cleared for worldwide game distribution"
+        )
+    # Hi3D refines a mesh made by Hunyuan3D-2 mini, so it inherits that model's
+    # territorial restriction even though Hi3D's own licence is broader.
+    if (
+        use_case == "game"
+        and distribution == "worldwide"
+        and backend == "hi3d"
+    ):
+        raise ValueError(
+            "Hi3D refines a Hunyuan3D-2 mini mesh, and Hunyuan's weights are not licensed "
+            "in the EU, the UK or South Korea, so its outputs are not cleared for worldwide "
+            "game distribution"
         )
     return profile
 

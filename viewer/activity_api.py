@@ -98,6 +98,7 @@ class Chain:
     picture_settings: dict[str, Any] = field(default_factory=dict)  # size, steps, seed (the image job checks them)
     model_seed: int | None = None                                    # a fresh 3D try each time; None = engine default
     keep_everything: bool = False                                    # the 3D step keeps its textures, meshes, caches
+    colab_settings: dict[str, Any] = field(default_factory=dict)     # accelerator/resolution for a rented-GPU engine
     finish_settings: dict[str, Any] = field(default_factory=dict)    # detail and Pixel Match (the finish job checks them)
     move_settings: dict[str, Any] = field(default_factory=dict)      # speed, arm_spread (the animate job checks them)
     made: dict[str, str | None] = field(default_factory=dict)       # picture/model/finished/rigged paths
@@ -303,6 +304,10 @@ class ChainRunner:
                 settings["seed"] = chain.model_seed
             if chain.keep_everything:
                 settings["debug"] = True
+            # The GPU and detail pickers, forwarded as the route's own settings. A local
+            # backend's validator rejects unknown keys, so this is only passed to a remote
+            # engine -- which is the only kind the pickers are shown for.
+            settings.update(chain.colab_settings)
             files = {"image": self._picture(chain)}
             if chain.made.get("back") and chain.engine in FRONT_BACK_ENGINES:
                 files["back"] = self._file(chain.made["back"])
@@ -413,6 +418,19 @@ def local_request(base: str) -> Request:
     return request
 
 
+def _json_object(raw: str | None) -> dict[str, Any]:
+    """A JSON field the browser sent, or nothing. Malformed input is the server's guess, not
+    a reason to refuse the whole plan: the pickers are a convenience, and a stale tab must
+    still be able to start a job with the route's defaults."""
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def chain_from_form(form: dict[str, dict[str, Any]]) -> Chain:
     """A plan as the studio sends it (multipart: text fields plus an optional uploaded file)."""
     def text(name: str) -> str | None:
@@ -434,6 +452,7 @@ def chain_from_form(form: dict[str, dict[str, Any]]) -> Chain:
         if isinstance(picture, dict) else {},
         model_seed=int(text("model_seed")) if (text("model_seed") or "").isdigit() else None,
         keep_everything=text("keep_everything") in ("1", "true"),
+        colab_settings=_json_object(text("colab_settings")),
         finish_settings={k: finish[k] for k in FINISH_KEYS if k in finish} if isinstance(finish, dict) else {},
         move_settings={k: move[k] for k in MOVE_KEYS if k in move} if isinstance(move, dict) else {},
         made={k: str(v) for k, v in made.items() if k in ("picture", "back", "model", "finished", "rigged") and v},

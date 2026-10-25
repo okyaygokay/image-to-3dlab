@@ -337,6 +337,14 @@ ADVANCED: dict[str, dict[str, Any]] = {
     "keep_everything": {
         "step": "model", "type": "bool", "default": False,
         "what": "The 3D step keeps its in-between textures, meshes and caches (several GB) for inspection."},
+    "accelerator": {
+        "step": "model", "type": "str", "choices": ["G4", "A100", "L4", "T4", "H100"], "default": "G4",
+        "what": "Which GPU a Colab-hosted engine (colab-hi3d and friends) rents. Ignored by a local route.",
+        "try_off_when": "G4 is unavailable and the run is queued: A100 or L4 has more capacity."},
+    "resolution": {
+        "step": "model", "type": "int", "choices": [512, 1024, 1536], "default": 1024,
+        "what": "Sparse extraction grid for Hi3D on the VM: 1536 is the sharpest and the slowest. "
+                "Ignored by routes that do not take it."},
 }
 
 
@@ -574,6 +582,10 @@ def create(studio: Studio, *, want: str, description: str = "", image_path: str 
         form["first_move"] = move
     if adv["keep_everything"] and "model" in steps:
         form["keep_everything"] = "1"
+    if "model" in steps and (engine or "").startswith("colab-"):
+        # Only a rented-GPU route reads these; a local validator rejects unknown keys.
+        form["colab_settings"] = json.dumps({"accelerator": adv["accelerator"],
+                                             "resolution": adv["resolution"]})
     choices, move_settings = plan_extras(adv, finish_detail, pixel_match)
     refused = full_detail_refusal(steps, choices)
     if refused:
@@ -638,6 +650,9 @@ def continue_asset(studio: Studio, *, asset_id: str, up_to: str | None = None, w
         form["model_seed"] = str(int.from_bytes(os.urandom(3), "big"))
         if adv["keep_everything"]:
             form["keep_everything"] = "1"
+        if engine.startswith("colab-"):
+            form["colab_settings"] = json.dumps({"accelerator": adv["accelerator"],
+                                                 "resolution": adv["resolution"]})
     if "animated" in steps:
         moves = studio.get("api/animate/models")
         presets = moves.get("presets", []) if moves.get("installed") else []

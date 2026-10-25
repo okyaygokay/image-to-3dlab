@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import platform
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -118,6 +119,61 @@ def host_platform() -> str:
     return _host.host_platform()
 
 
+def colab_cli_present() -> bool:
+    """Whether the `colab` CLI is installed. The only local prerequisite a Colab route has."""
+    import shutil as _shutil
+
+    return _shutil.which("colab") is not None
+
+
+#: How long a "is the CLI signed in" answer is trusted, in seconds. Long enough that painting
+#: the Generate tab does not shell out once per backend, short enough that installing the CLI
+#: or signing in while the studio is open starts working without a restart.
+_COLAB_READY_TTL = 30.0
+_colab_ready_value: bool | None = None
+_colab_ready_at = 0.0
+
+
+def colab_ready(timeout: float = 20) -> bool:
+    """Whether a Colab-hosted engine can start: the CLI exists and an account answers.
+
+    Deliberately quiet on failure. This runs while painting the Generate tab, so a
+    signed-out account must read as "sign in" rather than raise out of a status payload.
+
+    Cached briefly: it shells out, the catalogue asks once per backend per status request,
+    and without a cache a single `/api/catalog` cost the better part of a minute across the
+    test suite. The cache is *short* rather than permanent on purpose -- someone who installs
+    the CLI or signs in while the studio is open must see it start working without a restart.
+    """
+    global _colab_ready_at, _colab_ready_value
+    now = time.monotonic()
+    if _colab_ready_value is not None and now - _colab_ready_at < _COLAB_READY_TTL:
+        return _colab_ready_value
+    _colab_ready_value = _probe_colab(timeout)
+    _colab_ready_at = now
+    return _colab_ready_value
+
+
+def forget_colab_readiness() -> None:
+    """Drop the cached answer, so the next check asks again. For tests and for Setup."""
+    global _colab_ready_value, _colab_ready_at
+    _colab_ready_value = None
+    _colab_ready_at = 0.0
+
+
+def _probe_colab(timeout: float) -> bool:
+    if not colab_cli_present():
+        return False
+    try:
+        done = _host.subprocess.run(
+            ["colab", "sessions"], capture_output=True, text=True, timeout=timeout,
+            check=False,
+        )
+    except (OSError, _host.subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
 def host_label(host: str) -> str:
     """This machine, named the way its owner would name it."""
     if host in PLATFORM_LABELS:
@@ -148,6 +204,11 @@ class WeightSet:
     # downloaded" on the machine that built it. Whichever location holds the most bytes
     # wins, so a cache that is partly populated still counts for what it has.
     alt_paths: tuple[Path, ...] = ()
+    # The weights live on a rented machine (a Colab VM), so this disk has none of them and
+    # counting them here would report a working route as 0% downloaded forever. Set only by
+    # the Colab-hosted entries; the size is still declared, because stating what a route
+    # will fetch is the point of this catalogue.
+    remote_only: bool = False
 
     def files(self) -> list[Path]:
         return sorted(self.path.glob(self.pattern)) if self.pattern and self.path.is_dir() else []
@@ -160,6 +221,9 @@ class WeightSet:
         weights, its image-large decoder and its DINOv3 encoder all live in one directory --
         so without it each reports the whole tree and the card's total reads 53 GB of 17.9.
         """
+        if self.remote_only:
+            # Present by definition: it is on the VM, and this disk is not where to look.
+            return True, self.bytes_expected, None
         if self.pattern is not None:
             found, size = self._pattern_state()
             return found, size, None
@@ -186,6 +250,24 @@ class WeightSet:
 
     def describe(self) -> dict[str, Any]:
         present, actual, alt_path = self.state()
+        if self.remote_only:
+            # Nothing of it is on this disk, so there is no path and no URL to a local
+            # copy. Saying "14.7 GB on disk" about a VM's weights is exactly the kind of
+            # confident wrongness that wastes an afternoon.
+            return {
+                "label": self.label,
+                "source": self.source,
+                "source_url": None,
+                "bytes_expected": self.bytes_expected,
+                "human_expected": human_bytes(self.bytes_expected),
+                "present": present,
+                "bytes_present": 0,
+                "human_present": "on the rented GPU",
+                "path": None,
+                "alt_path": None,
+                "remote": True,
+                "note": self.note,
+            }
         return {
             "label": self.label,
             "source": self.source,
@@ -198,6 +280,7 @@ class WeightSet:
             "human_present": human_bytes(actual),
             "path": str(self.path),
             "alt_path": alt_path,
+            "remote": False,
             "note": self.note,
         }
 
@@ -380,17 +463,35 @@ class Backend:
         return (f"{self.label} was installed here and is no longer: {listed} is missing. "
                 f"Setup will rebuild it.")
 
+    def is_remote(self) -> bool:
+        """True for a Colab-hosted entry: its weights live on a rented machine."""
+        return bool(self.weights) and all(w.remote_only for w in self.weights)
+
+    def remote_ready(self) -> bool:
+        """Whether the `colab` CLI can reach an account. Only meaningful for is_remote()."""
+        return colab_ready()
+
     def describe(self, host: str | None = None) -> dict[str, Any]:
         weights = [w.describe() for w in self.weights]
         present = _total_present(weights)
-        built = self.built_on(host)
+        remote = self.is_remote()
+        # A Colab route has nothing to build on this disk: its readiness *is* the CLI and
+        # an account. Saying "not installed" because this machine has no venv would hide
+        # the one route a Mac can use, which is the whole reason it exists.
+        built = self.remote_ready() if remote else self.built_on(host)
         supported = self.runs_here(host)
         said = self.overrides_by_host.get(host or host_platform(), {})
         fetches = self.setup_fetches_on(host)
+        hint = self.build_hint(host)
+        if remote and not built:
+            hint = (
+                "The `colab` CLI is not signed in. Run `uv tool install google-colab-cli` "
+                "in a terminal, then `colab sessions` to sign in once."
+            )
         return {
             "build_present": built,
             "build_missing": [str(p) for p in self.missing_build_probes(host)],
-            "build_hint": self.build_hint(host),
+            "build_hint": hint,
             "supported_here": supported,
             "requires": runs_on_phrase(self),
             # Said once, in words, so the screen can explain instead of a button failing.
@@ -420,6 +521,7 @@ class Backend:
             "bytes_removable": sum(d["bytes_present"] for d, w in zip(weights, self.weights)
                                    if not is_shared(self, w)),
             "automated_setup": self.automated_setup,
+            "remote": remote,
             "state": "unsupported" if not supported else
                      _state(weights, built, fetches),
             "action": "none" if not supported else
@@ -435,7 +537,10 @@ CATALOG: tuple[Backend, ...] = (
     Backend(
         id="pixal3d",
         label="Pixal3D (C++/GGML)",
-        rank=1,
+        # Rank 1 belongs to the Colab route: this lab's interface runs on rented GPUs, and
+        # a recommendation is only useful if it is the thing a newcomer should actually
+        # pick. Pixal3D keeps its quality claim, one rank down.
+        rank=2,
         best_for="Best results we have. One pass, no repaint needed.",
         tradeoff=(
             "On a Mac it compiles locally and needs full Xcode for the Metal compiler. "
@@ -635,6 +740,56 @@ CATALOG: tuple[Backend, ...] = (
         ),
     ),
     Backend(
+        id="hi3d",
+        label="Hi3D 1.0 (refinement)",
+        rank=3,
+        best_for=(
+            "Sharpest detail we have on a mesh that already looks right: it samples a far "
+            "finer surface from a picture plus a coarse mesh."
+        ),
+        tradeoff=(
+            "Not an image-to-mesh model. It refines a coarse mesh, so it runs Hunyuan3D-2 "
+            "mini first unless you supply one. Linux with an NVIDIA card, compute "
+            "capability 8.0 or newer, and its own venv because its torch is newer than "
+            "Hunyuan's."
+        ),
+        license_name="Hi3D Open License 1.0",
+        license_url="https://github.com/hi3d-official/Hi3Dv1.0/blob/main/LICENSE",
+        install="scripts/bootstrap_hi3d.py",
+        runs_on=(NVIDIA,),
+        excludes=((NVIDIA, "windows"),),
+        setup_minutes=35,
+        build_probes=(REPO / "vendor" / "hi3d" / ".i2l-build-complete",),
+        caveat=(
+            'Commercial use is allowed but needs "Powered by Hi3D 1.0" displayed, and a '
+            "separate licence past 200,000 monthly users or USD 1,000,000 monthly revenue. "
+            "The coarse stage's Hunyuan weights are not licensed in the EU, the UK or "
+            "South Korea."
+        ),
+        weights=(
+            WeightSet("Hi3D v1.0 refinement weights", "hi3d-official/Hi3Dv1.0",
+                      int(7.73 * GB), HF_HUB_DIR / "models--hi3d-official--Hi3Dv1.0",
+                      note="Two 1.8 B-parameter transformers, the sparse VAE and the "
+                           "scheduler config. Not mirrored on ModelScope, so this comes "
+                           "from Hugging Face at a pinned commit."),
+            WeightSet("DINOv2-large image encoder", "facebook/dinov2-large", int(1.22 * GB),
+                      HF_HUB_DIR / "models--facebook--dinov2-large",
+                      note="Hi3D reads the picture with it. Also used by SF3D."),
+            WeightSet("CLIP-large image encoder", "openai/clip-vit-large-patch14",
+                      int(1.71 * GB),
+                      HF_HUB_DIR / "models--openai--clip-vit-large-patch14",
+                      note="The second half of Hi3D's image conditioning. Upstream fetches "
+                           "it unannounced on the first run; here it is fetched at setup."),
+            WeightSet("Hunyuan3D-2 mini turbo (coarse stage)", "tencent/Hunyuan3D-2mini",
+                      int(3.82 * GB), HF_HUB_DIR / "models--tencent--Hunyuan3D-2mini",
+                      note="Makes the coarse mesh Hi3D refines. Territory-restricted: not "
+                           "licensed for use in the EU, the UK or South Korea."),
+            WeightSet("BiRefNet-lite background remover", _matte.LITE_URL, _matte.LITE_BYTES,
+                      _matte.model_file(_matte.LITE_MODEL),
+                      note="Cuts out pictures without alpha. Shared with the other routes."),
+        ),
+    ),
+    Backend(
         id="sf3d",
         label="Stable Fast 3D",
         rank=5,
@@ -789,6 +944,37 @@ CATALOG: tuple[Backend, ...] = (
         ),
     ),
     Backend(
+        id="colab-gpu",
+        label="Rent a Colab GPU",
+        kind="tool",
+        best_for=(
+            "Runs a backend on a rented Cloud GPU instead of this machine, for a card this "
+            "Mac or laptop does not have."
+        ),
+        tradeoff=(
+            "Costs Colab compute units from your own account, and the first job on a fresh "
+            "VM spends 15-30 minutes installing. Sessions stop themselves after three idle "
+            "hours."
+        ),
+        license_name="Your Colab account's terms; the backend's licence still applies",
+        license_url="https://colab.research.google.com/",
+        install="uv tool install google-colab-cli, then sign in once",
+        runs_on=(APPLE, NVIDIA, AMD),
+        setup_minutes=2,
+        automated_setup=False,
+        # Nothing is downloaded on this machine -- the weights land on the VM -- but the
+        # card still has to state a size, because that is what the user is agreeing to when
+        # they pick a route. This is the smallest remote install (Hi3D + its coarse stage);
+        # the viewer names the per-backend figure before starting a job.
+        weights=(
+            WeightSet("Backend install on the VM (Hi3D + coarse stage)", "colab",
+                      int(14.7 * GB), REPO / "vendor" / "hi3d",
+                      note="Fetched onto the rented machine, not this one. A different "
+                           "backend makes this bigger or smaller. Nothing lands on your "
+                           "disk, and the VM is discarded when the session stops."),
+        ),
+    ),
+    Backend(
         id="matte",
         label="Background remover (BiRefNet-lite)",
         kind="tool",
@@ -879,6 +1065,120 @@ CATALOG: tuple[Backend, ...] = (
         ),
     ),
 )
+
+# ---------------------------------------------------------------------------------------
+# Colab-hosted engines
+#
+# The same models as the local routes, run on a rented Google Colab GPU. Separate entries
+# rather than an option on the local ones because "is this ready" is a different question:
+# a local route is ready when its venv and weights are on *this* disk, while a Colab route
+# is ready when the `colab` CLI can reach an account and needs no local bytes at all. The
+# Generate tab filters on `state == "ready"`, so a Mac with no NVIDIA card -- the machine
+# this lab mostly runs on -- would never see them otherwise.
+#
+# Their weights are marked `remote_only`: declared (so the size is still stated, as
+# AGENTS.md requires) but never counted or removed here, because they land on the VM and go
+# with it when the session stops.
+# ---------------------------------------------------------------------------------------
+
+#: Shown before a run, because a rented GPU is a bill and the session's lifetime is part of
+#: what the user is agreeing to.
+COLAB_IDLE_HOURS = 3
+
+
+def _remote_weight(label: str, gb: float, note: str) -> WeightSet:
+    return WeightSet(label, "colab", int(gb * GB), Path("/content/i2l/vendor") / label,
+                     note=note, remote_only=True)
+
+
+def _colab_weight_note(what: str) -> str:
+    return (f"{what} fetched onto the rented VM, not this disk. Discarded with the session, "
+            f"and never counted or removed here.")
+
+
+COLAB_BACKENDS: tuple[Backend, ...] = (
+    Backend(
+        id="colab-hi3d",
+        label="Hi3D 1.0 (Colab GPU)",
+        kind="3d",
+        rank=1,
+        best_for=(
+            "The sharpest detail we have, on a rented GPU: refines a coarse mesh at up to "
+            "1536³ without needing an NVIDIA card here."
+        ),
+        tradeoff=(
+            "Costs Colab compute units from your account. The first job on a fresh VM "
+            "spends 15-30 minutes installing; later jobs on that session are warm. The VM "
+            f"stops itself after {COLAB_IDLE_HOURS} idle hours."
+        ),
+        license_name="Hi3D Open License 1.0",
+        license_url="https://github.com/hi3d-official/Hi3Dv1.0/blob/main/LICENSE",
+        install="Install the `colab` CLI and sign in: uv tool install google-colab-cli",
+        runs_on=(APPLE, NVIDIA, AMD),
+        setup_minutes=2,
+        automated_setup=False,
+        caveat=(
+            'Commercial use is allowed but needs "Powered by Hi3D 1.0" displayed, and a '
+            "separate licence past 200,000 monthly users or USD 1,000,000 monthly revenue. "
+            "The coarse stage's Hunyuan weights are not licensed in the EU, the UK or "
+            "South Korea."
+        ),
+        weights=(_remote_weight("Hi3D 1.0 + coarse stage", 14.7,
+                                _colab_weight_note("Hi3D, its two encoders and the "
+                                                   "Hunyuan coarse generator,")),),
+    ),
+    Backend(
+        id="colab-hunyuan",
+        label="Hunyuan3D-2.1 (Colab GPU)",
+        kind="3d",
+        rank=2,
+        best_for="Tencent's own shape and PBR paint, on a rented card.",
+        tradeoff=(
+            "Costs Colab compute units, and the first job installs for 20-30 minutes. Its "
+            f"weights are territory-restricted. The VM stops after {COLAB_IDLE_HOURS} "
+            "idle hours."
+        ),
+        license_name="Tencent Hunyuan Community License",
+        license_url="https://huggingface.co/tencent/Hunyuan3D-2.1",
+        install="Install the `colab` CLI and sign in: uv tool install google-colab-cli",
+        runs_on=(APPLE, NVIDIA, AMD),
+        setup_minutes=2,
+        automated_setup=False,
+        caveat=(
+            "The Hunyuan weights are not licensed for use in the EU, the UK or South Korea. "
+            "Check the licence before downloading."
+        ),
+        weights=(_remote_weight("Hunyuan3D-2.1 shape + PBR paint", 19.5,
+                                _colab_weight_note("Shape, VAE, PBR paint and DINOv2-giant,")),),
+    ),
+    Backend(
+        id="colab-trellis",
+        label="TRELLIS.2 (Colab GPU)",
+        kind="3d",
+        rank=3,
+        best_for="Highest fidelity of the hosted routes, closest to the official demo.",
+        tradeoff=(
+            "Costs Colab compute units, and the first job installs for up to an hour. Its "
+            f"material model bleaches flat illustrations. The VM stops after "
+            f"{COLAB_IDLE_HOURS} idle hours."
+        ),
+        license_name="MIT (code + weights); DINOv3 License (image encoder)",
+        license_url="https://huggingface.co/microsoft/TRELLIS.2-4B",
+        install="Install the `colab` CLI and sign in: uv tool install google-colab-cli",
+        runs_on=(APPLE, NVIDIA, AMD),
+        setup_minutes=2,
+        automated_setup=False,
+        caveat=(
+            "Its DINOv3 image encoder is gated: request access on Hugging Face first, or "
+            "the install stops part-way."
+        ),
+        weights=(_remote_weight("TRELLIS.2-4B + DINOv3 encoder", 17.0,
+                                _colab_weight_note("The model, its image-large decoder and "
+                                                   "the DINOv3 encoder,")),),
+    ),
+)
+
+CATALOG = CATALOG + COLAB_BACKENDS
 
 BY_ID = {backend.id: backend for backend in CATALOG}
 
@@ -1035,7 +1335,10 @@ def _weights_state(weights: list[dict[str, Any]]) -> str:
     """
     if not weights:
         return "ready"
-    if all(w["bytes_present"] >= w["bytes_expected"] * 0.85 for w in weights):
+    # A remote weight is on the VM by definition; there are no bytes here to measure. It is
+    # satisfied when it says it is present, never "0% downloaded" for a working route.
+    if all(w["present"] if w.get("remote") else
+           w["bytes_present"] >= w["bytes_expected"] * 0.85 for w in weights):
         return "ready"
     if any(w["bytes_present"] > 0 for w in weights):
         return "partial"

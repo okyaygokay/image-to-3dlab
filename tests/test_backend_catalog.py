@@ -38,9 +38,14 @@ def test_the_hunyuan_territorial_restriction_is_surfaced():
 
 
 def test_exactly_one_backend_is_recommended():
+    """One recommendation, and it is the thing a newcomer should actually use.
+
+    Rank 1 is the Colab route because this lab's interface runs on rented GPUs: a
+    recommendation that needs an NVIDIA card the reader may not have is not advice.
+    """
     recommended = [b for b in bc.CATALOG if b.rank == 1]
     assert len(recommended) == 1
-    assert recommended[0].id == "pixal3d"
+    assert recommended[0].id == "colab-hi3d"
 
 
 def test_no_weight_set_contains_another(tmp_path):
@@ -133,15 +138,23 @@ def test_onboarding_is_needed_only_when_nothing_is_ready(monkeypatch, tmp_path):
     # Pinned to a supported host: on any other machine every backend reports
     # "unsupported", which is a different question from "not installed yet".
     empty = bc.catalog_status(host=bc.APPLE)
-    assert empty["needs_onboarding"] is True
-    assert empty["ready_count"] == 0
-    # NVIDIA-only routes (Hunyuan3D-2.1) are "unsupported" on a Mac, not "missing".
-    here = [b for b in empty["backends"] if b["supported_here"]]
-    assert here and all(b["state"] == "missing" for b in here)
+    # Colab-hosted routes are ready from a bare clone: they need no local build and no
+    # local weights, only a signed-in CLI. That is the point of them, so a fresh clone is
+    # not "nothing installed" any more -- it is "ready to rent a GPU".
+    local = [b for b in empty["backends"] if b["supported_here"] and not b.get("remote")]
+    assert local and all(b["state"] == "missing" for b in local)
+    remote = [b for b in empty["backends"] if b.get("remote")]
+    assert remote and all(b["state"] == "ready" for b in remote)
+    # A machine with no Colab account needs onboarding to say why.
+    monkeypatch.setattr(bc, "_probe_colab", lambda *_a, **_k: False)
+    bc.forget_colab_readiness()
+    offline = bc.catalog_status(host=bc.APPLE)
+    assert offline["needs_onboarding"] is True
+    assert offline["ready_count"] == 0
     # "build" where the viewer can do it, "manual" where it cannot. Both mean "not yet";
     # neither means "nothing to offer", which is what an unsupported machine gets.
-    assert all(b["action"] in {"build", "manual"} for b in here)
-    assert all(b["action"] == ("build" if b["automated_setup"] else "manual") for b in here)
+    assert all(b["action"] in {"build", "manual"} for b in local)
+    assert all(b["action"] == ("build" if b["automated_setup"] else "manual") for b in local)
 
 
 def test_backends_are_listed_best_first():

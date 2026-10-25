@@ -12,7 +12,8 @@ export function readyEngines(catalog) {
     // weights arrive (they fetch on first run), so counting files here hid it from the picker.
     .filter((b) => b.kind === '3d' && b.state === 'ready')
     .sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99))
-    .map((b) => ({ id: b.id, label: b.label, license: b.license?.name || '', caveat: b.caveat || null }));
+    .map((b) => ({ id: b.id, label: b.label, license: b.license?.name || '', caveat: b.caveat || null,
+      remote: Boolean(b.remote), stages: b.stages || [] }));
 }
 
 /** Where to poll a job: the start response's status_url, or the conventional path. */

@@ -202,6 +202,13 @@ TRELLIS_ROCM_MARKER = TRELLIS_ROCM_VENDOR / ".i2l-build-complete"
 HUNYUAN_CUDA_VENDOR = REPO / "vendor" / "hunyuan-cuda"
 HUNYUAN_CUDA_WRAPPER = REPO / "scripts" / "hunyuan_cuda_generate.py"
 HUNYUAN_CUDA_PYTHON = HUNYUAN_CUDA_VENDOR / ".venv" / "bin" / "python"
+
+# Hi3D refines a coarse mesh; its own checkout is separate from Hunyuan's because the two
+# pinned stacks disagree about torch (Hi3D needs cu128 for Blackwell, Hunyuan-cuda does not).
+HI3D_VENDOR = REPO / "vendor" / "hi3d"
+HI3D_WRAPPER = REPO / "scripts" / "hi3d_generate.py"
+HI3D_PYTHON = HI3D_VENDOR / ".venv" / "bin" / "python"
+HI3D_MARKER = HI3D_VENDOR / ".i2l-build-complete"
 HUNYUAN_CUDA_MARKER = HUNYUAN_CUDA_VENDOR / ".i2l-build-complete"
 # Hunyuan3D-2.1 on Linux + AMD: the same upstream commit, compiled with hipcc instead of
 # nvcc by scripts/bootstrap_hunyuan_rocm.py. Its own vendor folder, because the weights
@@ -251,6 +258,13 @@ SELF_CUTTING: dict[tuple[str, str | None], str] = {
     # file that does the cutting is the same on both Linux cards. Naming the AMD wrapper
     # here would point the check at a file with no matte call in it.
     ("trellis", "amd"): "scripts/trellis_cuda_generate.py",
+    ("hi3d", None): "scripts/hi3d_generate.py",
+    # Colab routes cut the picture out on the VM, inside the wrapper, not in the
+    # supervisor. Pointing at the wrapper keeps the guard's question honest ("is there
+    # something that mattes this?") instead of claiming the supervisor does it.
+    ("colab-hi3d", None): "scripts/hi3d_generate.py",
+    ("colab-hunyuan", None): "scripts/hunyuan_cuda_generate.py",
+    ("colab-trellis", None): "scripts/trellis_cuda_generate.py",
 }
 
 # Xiong's paint+shape code is MIT and tracked in-repo at hunyuan_mlx/ (moved out of
@@ -2350,6 +2364,321 @@ def _hunyuan_rocm_readiness() -> dict[str, Any]:
     }
 
 
+# --- Hi3D v1.0 (refinement on NVIDIA) ----------------------------------------------------
+# Hi3D is not an image-to-mesh model: it refines a coarse mesh against a picture. So this
+# spec's args carry two stages, and its wrapper prints STAGE/PASS/STEP lines for both.
+# The studio treats it like any other route -- one image in, one GLB out -- because the
+# wrapper runs the coarse half itself.
+HI3D_DEFAULT_SETTINGS: dict[str, Any] = {
+    "resolution": 1024,
+    "steps": 25,
+    "coarse_steps": 30,
+    "coarse_octree": 256,
+    "seed": 0,
+}
+HI3D_STAGES = ["prepare", "coarse", "refine", "export"]
+HI3D_STAGE_LABELS = {
+    "prepare": "Cutting the subject out",
+    "coarse": "Building the coarse mesh (Hunyuan3D-2 mini)",
+    "refine": "Refining with Hi3D",
+    "export": "Writing the GLB",
+}
+#: `PASS 2/3` from the wrapper: which rung of the resolution ladder is running.
+HI3D_PASS_RE = re.compile(r"^PASS\s+(\d+)/(\d+)\s*$")
+#: `STEP 7/25 pass 2` from the wrapper: a scheduler update inside the current pass.
+HI3D_STEP_RE = re.compile(r"^STEP\s+(\d+)/(\d+)")
+
+
+def _hi3d_validate_settings(raw: Any) -> dict[str, Any]:
+    """Delegates to the backend module so the CLI and the studio share one validator."""
+    from image_to_3dlab.hi3d_backend import validate_settings
+
+    return validate_settings(raw)
+
+
+def _hi3d_build_args(job: Job) -> list[str]:
+    s = job.settings
+    return [
+        str(job.image_path), str(job.output_path),
+        "--resolution", str(s["resolution"]),
+        "--steps", str(s["steps"]),
+        "--coarse-steps", str(s["coarse_steps"]),
+        "--coarse-octree", str(s["coarse_octree"]),
+        "--seed", str(s["seed"]),
+    ]
+
+
+def _hi3d_parse_line(job: Job, line: str) -> None:
+    """Map the wrapper's STAGE/PASS/STEP lines onto the studio's stages.
+
+    Hi3D's ladder means progress is not linear in steps alone: a 1024 run walks two passes
+    and a 1536 run three, so `STEP 25/25` in pass 1 is *not* 100%. The bar is therefore
+    driven by completed passes, with the current pass filling the next slice.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return
+    if stripped.startswith("STAGE "):
+        name = stripped.split(None, 1)[1].strip()
+        if name in HI3D_STAGES:
+            pct = round(HI3D_STAGES.index(name) / len(HI3D_STAGES) * 100)
+            job.emit({"phase": name, "stage_pct": 0, "overall_pct": pct,
+                      "message": HI3D_STAGE_LABELS[name]})
+        return
+
+    pass_match = HI3D_PASS_RE.match(stripped)
+    if pass_match:
+        index, total = int(pass_match[1]), int(pass_match[2])
+        job.shape_pass = index
+        # Pass bookkeeping is a rung boundary, not a step: the bar moves when a pass ends.
+        pct = round((index - 1) / total * 100)
+        job.emit({"phase": "refine", "stage_pct": pct,
+                  "overall_pct": _hi3d_overall_pct(index - 1, total),
+                  "message": f"Refinement pass {index}/{total}"})
+        return
+
+    step_match = HI3D_STEP_RE.match(stripped)
+    if step_match:
+        step, total = int(step_match[1]), int(step_match[2])
+        total_passes = _hi3d_total_passes(job)
+        done_passes = max(0, job.shape_pass - 1)
+        within = step / total if total else 0.0
+        stage_pct = round((done_passes + within) / total_passes * 100)
+        job.emit({"phase": "refine", "step": step, "total": total, "stage_pct": stage_pct,
+                  "overall_pct": _hi3d_overall_pct(done_passes + within, total_passes),
+                  "message": f"Refining — pass {job.shape_pass or 1}/{total_passes}, "
+                             f"step {step}/{total}"})
+        return
+
+    if stripped.startswith(("matted with", "coarse mesh:", "refined in", "reusing coarse")):
+        phase = "coarse" if stripped.startswith(("coarse mesh:", "reusing coarse")) else "refine"
+        job.emit({"phase": phase, "stage_pct": 100,
+                  "overall_pct": _hi3d_overall_pct(0, _hi3d_total_passes(job)),
+                  "message": stripped[:200]})
+
+
+def _hi3d_total_passes(job: Job) -> int:
+    """How many refinement passes this job's resolution needs."""
+    from image_to_3dlab.hi3d_backend import passes_for
+
+    return passes_for(int(job.settings.get("resolution", 1024)))
+
+
+def _hi3d_overall_pct(progress: float, total_passes: int) -> int:
+    """Stage weights for the whole run: coarse 20%, refine 70%, export 10%.
+
+    The coarse stage is a fixed cost that does not grow with resolution, while refinement
+    is the part that does, so weighting refinement by pass count keeps the bar honest
+    across the 512/1024/1536 ladder.
+    """
+    done = max(0.0, min(float(progress), float(total_passes or 1)))
+    refine_fraction = done / (total_passes or 1)
+    return max(0, min(99, round(20 + refine_fraction * 70)))
+
+
+def _hi3d_readiness() -> dict[str, Any]:
+    """Ready only when built *and* every weight is on disk.
+
+    Hi3D's pipeline fetches whatever it is missing on first use, including the two
+    encoder repos it does not ship. A missing weight means setup has not finished, and a
+    run must not start downloading several GB behind the user's back.
+    """
+    import backend_catalog
+
+    built = (HI3D_MARKER.is_file() and HI3D_PYTHON.is_file() and HI3D_WRAPPER.is_file())
+    described = backend_catalog.BY_ID["hi3d"].describe()
+    weights = {w["label"]: {"label": w["label"], "present": w["present"],
+                            "human": w["human_present"]}
+               for w in described["weights"]}
+    missing = [label for label, w in weights.items() if not w["present"]]
+    ready = built and not missing
+    hint = None
+    if not built:
+        hint = ("Hi3D is not installed. Set it up from Setup & Status, or run "
+                "python scripts/bootstrap_hi3d.py (Linux with an NVIDIA card, "
+                f"{described['human_expected']}).")
+    elif missing:
+        hint = ("Hi3D weights are missing: " + "; ".join(missing)
+                + ". Run python scripts/bootstrap_hi3d.py --weights-only.")
+    return {
+        "schema_version": 1,
+        "build": {"present": built, "interpreter": str(HI3D_PYTHON),
+                  "wrapper": str(HI3D_WRAPPER), "hint": hint},
+        "weights": weights,
+        "missing_weights": missing,
+        "ready": ready,
+        # Not a refusal: the studio shows this and lets the user decide.
+        "warning": ("The coarse stage uses Hunyuan weights, which are not licensed in the "
+                    "EU, the UK or South Korea."),
+    }
+
+
+def hi3d_spec(host: str | None = None) -> BackendSpec:
+    """Hi3D on NVIDIA. Its own venv: its pinned torch is newer than Hunyuan-cuda's."""
+    return BackendSpec(
+        id="hi3d", label="Hi3D (refinement)",
+        interpreter=HI3D_PYTHON, wrapper=HI3D_WRAPPER,
+        default_settings=HI3D_DEFAULT_SETTINGS, stages=HI3D_STAGES,
+        stage_labels=HI3D_STAGE_LABELS,
+        # The wrapper mattes the picture itself, so the server need not.
+        requires_alpha=False,
+        validate_settings=_hi3d_validate_settings, build_args=_hi3d_build_args,
+        parse_line=_hi3d_parse_line, readiness=_hi3d_readiness,
+        # The refinement rung decides the peak, not a fixed figure; 1024^3 on a 96 GB card
+        # was comfortable, so this floor is deliberately conservative.
+        gpu_memory_wanted=int(24 * 1024 ** 3),
+    )
+
+
+# --- Colab-hosted routes -----------------------------------------------------------------
+# The studio runs this machine; the GPU need not be. These specs launch a *local* process
+# (scripts/colab_generate.py) that rents a VM, runs the same wrapper out there, and streams
+# the same stage lines back. The job runner needs no knowledge of any of it: it sees one
+# child process printing STAGE/STEP lines, exactly like a local route.
+#
+# Which accelerator and session to use come from the job's settings, so the Generate form
+# can offer them without a new code path per backend.
+
+COLAB_SETTINGS: dict[str, Any] = {
+    "accelerator": "G4",
+    "resolution": 1024,
+    "keep": False,
+}
+COLAB_ACCELERATORS = ("G4", "A100", "L4", "T4", "H100")
+COLAB_STAGES = ["start", "setup", "coarse", "refine", "export"]
+COLAB_STAGE_LABELS = {
+    "start": "Renting a GPU",
+    "setup": "Installing on the VM (first run only)",
+    "coarse": "Building the coarse mesh",
+    "refine": "Refining",
+    "export": "Bringing the GLB back",
+}
+
+
+def _colab_validate_settings(raw: Any) -> dict[str, Any]:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("settings must be a JSON object")
+    settings = {**COLAB_SETTINGS, **raw}
+    if settings["accelerator"] not in COLAB_ACCELERATORS:
+        raise ValueError(f"accelerator must be one of {COLAB_ACCELERATORS}")
+    try:
+        settings["resolution"] = int(settings["resolution"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("resolution must be an integer") from exc
+    settings["keep"] = bool(settings["keep"])
+    from image_to_3dlab.hi3d_backend import RESOLUTIONS
+
+    if settings["resolution"] not in RESOLUTIONS:
+        raise ValueError(f"resolution must be one of {RESOLUTIONS}")
+    return settings
+
+
+def _colab_build_args(remote_backend: str):
+    def build(job: Job) -> list[str]:
+        s = job.settings
+        return [
+            str(job.image_path), str(job.output_path),
+            "--backend", remote_backend,
+            "--accelerator", str(s["accelerator"]),
+            # --yes: the studio's own Create sheet is the confirmation. Asking again on a
+            # stdin nobody is attached to would hang the job.
+            "--yes",
+            *(["--keep"] if s.get("keep") else []),
+            "--",
+            "--resolution", str(s["resolution"]),
+        ]
+
+    return build
+
+
+def _colab_parse_line(job: Job, line: str) -> None:
+    """Map the supervisor's lines onto the panel's stages.
+
+    The supervisor passes the remote wrapper's own STAGE lines through, and wraps them with
+    its own for the parts only it knows about (renting, installing, downloading).
+    """
+    stripped = line.strip()
+    if not stripped:
+        return
+    if stripped.startswith(("allocating", "session ", "uploaded", "remote job started",
+                            "wrote ", "stopping session", "syncing")):
+        phase = "export" if stripped.startswith(("wrote ", "stopping")) else "start"
+        if stripped.startswith("syncing") or "install" in stripped:
+            phase = "setup"
+        job.emit({"phase": phase, "message": stripped[:200]})
+        return
+    if stripped.startswith("installing"):
+        job.emit({"phase": "setup", "message": stripped[:200]})
+        return
+    # The remote wrapper's own stage lines, forwarded verbatim.
+    if stripped.startswith("STAGE "):
+        name = stripped.split(None, 1)[1].strip()
+        if name in job_stage_ids():
+            job.emit({"phase": name, "message": f"On the Colab GPU: {name}"})
+        return
+    step = HUNYUAN_STEP_RE.match(stripped)
+    if step:
+        current, total = int(step[1]), int(step[2])
+        job.emit({"phase": "refine", "step": current, "total": total,
+                  "stage_pct": round(current / total * 100) if total else 0,
+                  "message": f"Refining on the Colab GPU — step {current}/{total}"})
+        return
+    if stripped.startswith(("error", "Refusing")):
+        job.emit({"phase": "start", "message": stripped[:200]})
+
+
+def job_stage_ids() -> set[str]:
+    """Stages a remote wrapper may report, minus the ones the supervisor names itself."""
+    return set(COLAB_STAGES)
+
+
+def _colab_readiness() -> dict[str, Any]:
+    """Ready when the `colab` CLI is installed and an account answers. No local weights."""
+    import backend_catalog
+
+    ready = backend_catalog.colab_ready()
+    hint = None
+    if not backend_catalog.colab_cli_present():
+        hint = "Install the `colab` CLI: uv tool install google-colab-cli"
+    elif not ready:
+        hint = "Sign in to Colab: run `colab sessions` once in a terminal."
+    return {
+        "schema_version": 1,
+        "build": {"present": ready, "hint": hint},
+        "weights": {},
+        "missing_weights": [],
+        "ready": ready,
+        "warning": ("A rented GPU costs Colab compute units. The VM stops itself after "
+                    "three idle hours."),
+    }
+
+
+def colab_spec(remote_backend: str) -> BackendSpec:
+    """A Colab-hosted route, as one local process the job runner already understands."""
+    labels = {
+        "hi3d": "Hi3D 1.0 (Colab GPU)",
+        "hunyuan_cuda": "Hunyuan3D-2.1 (Colab GPU)",
+        "trellis_cuda": "TRELLIS.2 (Colab GPU)",
+    }
+    return BackendSpec(
+        id=f"colab-{remote_backend.split('_')[0]}",
+        label=labels.get(remote_backend, f"{remote_backend} (Colab GPU)"),
+        interpreter=Path(sys.executable),
+        wrapper=REPO / "scripts" / "colab_generate.py",
+        default_settings=COLAB_SETTINGS, stages=COLAB_STAGES,
+        stage_labels=COLAB_STAGE_LABELS,
+        # The remote wrapper mattes the picture itself.
+        requires_alpha=False,
+        validate_settings=_colab_validate_settings,
+        build_args=_colab_build_args(remote_backend),
+        parse_line=_colab_parse_line, readiness=_colab_readiness,
+        # All the memory is on the VM; this machine needs none of it.
+        gpu_memory_wanted=None,
+    )
+
+
 def sf3d_spec(host: str | None = None) -> BackendSpec:
     """SF3D for this machine: this interpreter on a Mac, its own venv on AMD.
 
@@ -2384,6 +2713,10 @@ def sf3d_spec(host: str | None = None) -> BackendSpec:
 BACKENDS.update({
     "trellis": trellis_spec(),
     "sf3d": sf3d_spec(),
+    "hi3d": hi3d_spec(),
+    "colab-hi3d": colab_spec("hi3d"),
+    "colab-hunyuan": colab_spec("hunyuan_cuda"),
+    "colab-trellis": colab_spec("trellis_cuda"),
     "hunyuan-mlx": BackendSpec(
         id="hunyuan-mlx", label="Hunyuan3D-MLX (dgrauet shape + Xiong paint)",
         interpreter=HUNYUAN_PYTHON, wrapper=HUNYUAN_WRAPPER,

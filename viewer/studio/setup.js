@@ -15,6 +15,7 @@ import { showsCaveat } from '../components/gated-caveat.js';
 import { panelState, runTitle } from '../components/setup-progress.js';
 
 const s = (id) => document.getElementById(id);
+const esc = (text) => String(text ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // `panelFor` is the backend whose download the progress panel shows. It outlives the run
 // so the finished result stays under the card that started it. `panel` is that same backend
@@ -48,12 +49,18 @@ function backendCard(backend, { readOnly = false } = {}) {
   card.className = `setup-card ${readOnly ? 'elsewhere' : backend.state}`;
   card.dataset.backend = backend.id;
 
-  const size = !readOnly && backend.state === 'partial'
-    ? `${backend.human_present} of ${backend.human_expected}`
-    : backend.human_expected;
+  // A remote route's weights are on the VM, so the size is stated as such rather than as
+  // disk use here — the Setup page's whole job is to be accurate about this machine.
+  const size = backend.remote ? `${backend.human_expected} on the rented GPU`
+    : !readOnly && backend.state === 'partial'
+      ? `${backend.human_present} of ${backend.human_expected}`
+      : backend.human_expected;
   // Say where the weights are when they are not here yet but the backend still works.
-  const later = !readOnly && backend.action === 'none' && backend.bytes_present === 0
-    ? ' · weights download on your first run' : '';
+  // A Colab route never has bytes here at all, so "download on your first run" would be a
+  // promise about this disk that it never keeps.
+  const later = readOnly || backend.remote ? ''
+    : backend.action === 'none' && backend.bytes_present === 0
+      ? ' · weights download on your first run' : '';
 
   card.innerHTML = `
     <div class="setup-card-head">
@@ -75,8 +82,11 @@ function backendCard(backend, { readOnly = false } = {}) {
       <summary>What gets downloaded</summary>
       <ul>${backend.weights.map((w) => `
         <li>
-          <a href="${w.source_url}" target="_blank" rel="noopener">${w.source}</a>
-          — ${w.human_expected}${w.present ? ` (${w.human_present} on disk)` : ''}
+          ${w.source_url
+            ? `<a href="${w.source_url}" target="_blank" rel="noopener">${w.source}</a>`
+            : esc(w.source)}
+          — ${w.human_expected}${w.remote ? ` (${esc(w.human_present)})`
+            : w.present ? ` (${w.human_present} on disk)` : ''}
           ${w.note ? `<br><small>${w.note}</small>` : ''}
         </li>`).join('')}
       </ul>

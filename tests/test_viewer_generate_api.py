@@ -418,7 +418,9 @@ def test_job_status_payload_names_the_model_once_it_is_on_disk(tmp_path, monkeyp
 def test_backend_registry_lists_every_backend():
     assert set(api.BACKENDS) == {
         "trellis", "sf3d", "hunyuan-mlx", "hunyuan-mlx-xiong", "pixal3d", "hunyuan-cuda",
-        "hunyuan-rocm",
+        "hunyuan-rocm", "hi3d",
+        # Colab-hosted: the same models on a rented GPU.
+        "colab-hi3d", "colab-hunyuan", "colab-trellis",
     }
     for spec in api.BACKENDS.values():
         assert spec.stages, f"{spec.id} must declare at least one stage"
@@ -1972,3 +1974,140 @@ def test_a_backend_is_found_by_its_catalogue_id_too():
     assert api.backend_spec("trellis") is api.BACKENDS["trellis"]
     assert api.backend_spec("no-such-engine") is None
 
+
+
+# --- Hi3D (refinement) ---------------------------------------------------------------------
+# Hi3D walks a resolution ladder -- 512 is one pass, 1024 two, 1536 three -- so a step
+# number alone does not say how far along a run is. These tests exist because a progress
+# bar that reaches 100% at the first pass's last step is worse than no bar: it reads as a
+# hung job while the second transformer loads.
+
+
+def _hi3d_job(tmp_path, settings=None):
+    spec = api.BACKENDS["hi3d"]
+    values = spec.validate_settings(settings or {})
+    return api.Job("0" * 32, tmp_path, tmp_path / "in.png", tmp_path / "out.glb",
+                   values, "hi3d")
+
+
+def test_hi3d_is_registered_with_its_own_stages():
+    spec = api.BACKENDS["hi3d"]
+    assert spec.stages == ["prepare", "coarse", "refine", "export"]
+    assert spec.requires_alpha is False, "its wrapper mattes the picture itself"
+
+
+def test_hi3d_build_args_match_the_wrapper_cli(tmp_path):
+    job = _hi3d_job(tmp_path, {"resolution": 1536, "steps": 12, "seed": 7})
+    args = api.BACKENDS["hi3d"].build_args(job)
+    assert args[0] == str(job.image_path) and args[1] == str(job.output_path)
+    assert args[args.index("--resolution") + 1] == "1536"
+    assert args[args.index("--steps") + 1] == "12"
+    assert args[args.index("--seed") + 1] == "7"
+
+
+def test_hi3d_stage_lines_name_declared_stages(tmp_path):
+    spec = api.BACKENDS["hi3d"]
+    job = _hi3d_job(tmp_path)
+    for line in ("STAGE prepare", "STAGE coarse", "STAGE refine", "STAGE export",
+                 "PASS 1/2", "STEP 3/25 pass 1"):
+        spec.parse_line(job, line)
+    emitted = {event["phase"] for event in job.events}
+    assert emitted <= set(spec.stages), emitted
+    assert emitted, "the panel would stay frozen"
+
+
+def test_hi3d_progress_does_not_reach_100_at_the_first_pass(tmp_path):
+    """The bug this guards: STEP 25/25 in pass 1 of a two-pass run is halfway, not done."""
+    job = _hi3d_job(tmp_path, {"resolution": 1024})
+    spec = api.BACKENDS["hi3d"]
+    spec.parse_line(job, "PASS 1/2")
+    spec.parse_line(job, "STEP 25/25 pass 1")
+    halfway = job.events[-1]["overall_pct"]
+    assert 0 < halfway < 100, halfway
+    spec.parse_line(job, "PASS 2/2")
+    spec.parse_line(job, "STEP 25/25 pass 2")
+    assert job.events[-1]["overall_pct"] > halfway
+
+
+def test_hi3d_progress_for_three_passes_is_ordered(tmp_path):
+    job = _hi3d_job(tmp_path, {"resolution": 1536})
+    spec = api.BACKENDS["hi3d"]
+    seen = []
+    for index in (1, 2, 3):
+        spec.parse_line(job, f"PASS {index}/3")
+        seen.append(job.events[-1]["overall_pct"])
+        spec.parse_line(job, f"STEP 25/25 pass {index}")
+        seen.append(job.events[-1]["overall_pct"])
+    assert seen == sorted(seen), seen
+    assert seen[-1] < 100, "the export stage still has to happen"
+
+
+def test_hi3d_unknown_lines_are_ignored_rather_than_inventing_a_stage(tmp_path):
+    job = _hi3d_job(tmp_path)
+    spec = api.BACKENDS["hi3d"]
+    before = len(job.events)
+    spec.parse_line(job, "some chatter from a library")
+    spec.parse_line(job, "")
+    assert len(job.events) == before
+
+
+def test_hi3d_settings_reject_a_resolution_off_the_ladder():
+    spec = api.BACKENDS["hi3d"]
+    with pytest.raises(ValueError):
+        spec.validate_settings({"resolution": 768})
+
+
+def test_hi3d_readiness_names_the_bootstrap_when_not_installed(monkeypatch, tmp_path):
+    monkeypatch.setattr(api, "HI3D_MARKER", tmp_path / "no-marker")
+    status = api._hi3d_readiness()
+    assert status["ready"] is False
+    assert "bootstrap_hi3d.py" in status["build"]["hint"]
+
+
+def test_a_colab_engine_is_offered_where_no_nvidia_card_exists():
+    """The point of the Colab routes: a Mac with no NVIDIA card must see them.
+
+    The picker filters on `kind == "3d"` and `state == "ready"`, so a route whose readiness
+    was "is the venv built here" could never appear on the machine this lab mostly runs on.
+    """
+    import backend_catalog
+
+    offered = [b for b in backend_catalog.catalog_status(host=backend_catalog.APPLE)["backends"]
+               if b["kind"] == "3d" and b["state"] == "ready"]
+    ids = {b["id"] for b in offered}
+    for wanted in ("colab-hi3d", "colab-hunyuan", "colab-trellis"):
+        assert wanted in ids, f"{wanted} is not offered on a Mac"
+        assert wanted in api.BACKENDS, f"{wanted} has no BackendSpec"
+        assert offered[[b["id"] for b in offered].index(wanted)]["remote"] is True
+
+
+def test_a_colab_route_starts_the_local_supervisor(tmp_path):
+    """The GUI runs one local process and knows nothing about the cloud.
+
+    `scripts/colab_generate.py` is that process: it rents the VM, runs the wrapper out there
+    and streams the same STAGE lines a local route prints. The job runner needs no new path.
+    """
+    from pathlib import Path
+
+    spec = api.BACKENDS["colab-hi3d"]
+    assert spec.wrapper == Path(api.REPO) / "scripts" / "colab_generate.py"
+    job = api.Job("0" * 32, tmp_path, tmp_path / "in.png", tmp_path / "out.glb",
+                  spec.validate_settings({"accelerator": "A100", "resolution": 1536}),
+                  "colab-hi3d")
+    args = spec.build_args(job)
+    assert "--backend" in args and "hi3d" in args
+    assert "A100" in args, "the accelerator picker must reach the command line"
+    assert "1536" in args, "the detail picker must reach the wrapper"
+    assert "--yes" in args, "the studio's own sheet is the confirmation"
+
+
+def test_colab_settings_reject_a_bad_accelerator():
+    """Better a clear 422 than a VM that silently ignores the choice."""
+    validate = api.BACKENDS["colab-hi3d"].validate_settings
+    with pytest.raises(ValueError, match="accelerator"):
+        validate({"accelerator": "TPU-v7"})
+    with pytest.raises(ValueError, match="resolution"):
+        validate({"resolution": 999})
+    # defaults survive a partial form, so an old tab still works
+    out = validate({})
+    assert out["accelerator"] and out["resolution"] in (512, 1024, 1536)

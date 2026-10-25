@@ -30,6 +30,14 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--trellis", action="store_true", help="Run TRELLIS.2 through the Mac port"
     )
+    mode.add_argument(
+        "--hi3d",
+        action="store_true",
+        help=(
+            "Refine a coarse mesh with Hi3D v1.0 (needs NVIDIA, compute capability 8.0+). "
+            "Pass --coarse-mesh, or let Hunyuan3D-2 mini make one."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("output"))
     parser.add_argument(
         "--view",
@@ -125,6 +133,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout", type=float, default=3600, help="Job timeout in seconds"
     )
     quality.add_argument("--poll-interval", type=float, default=2)
+
+    hi3d = parser.add_argument_group("Hi3D options")
+    hi3d.add_argument(
+        "--hi3d-repo", type=Path, default=Path("vendor/Hi3Dv1.0"),
+        help="Hi3D checkout, its own venv and CUDA kernels",
+    )
+    hi3d.add_argument(
+        "--coarse-mesh", type=Path,
+        help=(
+            "An existing coarse mesh of the same object. Without it Hunyuan3D-2 mini "
+            "generates one (its weights are territory-restricted; see the licence note)."
+        ),
+    )
+    hi3d.add_argument(
+        "--resolution", type=int, choices=(512, 1024, 1536), default=1024,
+        help="Sparse extraction grid. 512 is one pass, 1536 is all three.",
+    )
+    hi3d.add_argument(
+        "--hi3d-steps", type=int, default=25,
+        help="Scheduler updates per pass (25 is the project's default)",
+    )
+    hi3d.add_argument(
+        "--coarse-steps", type=int, default=30,
+        help="Hunyuan3D-2 mini sampler steps (30 suits the turbo variant)",
+    )
     return parser
 
 
@@ -151,7 +184,8 @@ def main(argv: list[str] | None = None) -> int:
             args.fast = backend == "sf3d"
             args.quality = backend == "hunyuan-comfyui"
             args.trellis = backend == "trellis2"
-            if not (args.fast or args.quality or args.trellis):
+            args.hi3d = backend == "hi3d"
+            if not (args.fast or args.quality or args.trellis or args.hi3d):
                 raise ValueError(f"backend {backend!r} is not implemented yet")
             parameters = model.get("parameters", {})
             args.model = model.get("id", args.model)
@@ -180,13 +214,18 @@ def main(argv: list[str] | None = None) -> int:
                 args.trellis_remesh = bool(parameters["trellis_remesh"])
             if "trellis_remesh_project" in parameters:
                 args.trellis_remesh_project = float(parameters["trellis_remesh_project"])
+            for key in ("resolution", "steps", "coarse_steps"):
+                if key in parameters:
+                    # `steps` means Hi3D's when refining, TRELLIS's otherwise; the
+                    # manifest names one backend, so there is no ambiguity to resolve.
+                    setattr(args, "hi3d_steps" if key == "steps" else key, parameters[key])
             args.output_dir = Path(
                 manifest_data.get("output", {}).get("directory", args.output_dir)
             )
         except (KeyError, TypeError, ValueError) as exc:
             print(f"error: invalid run manifest: {exc}", file=sys.stderr)
             return 2
-    elif args.image is None or sum((args.fast, args.quality, args.trellis)) != 1:
+    elif args.image is None or sum((args.fast, args.quality, args.trellis, args.hi3d)) != 1:
         print(
             "error: provide --run-manifest, or IMAGE with exactly one mode",
             file=sys.stderr,
@@ -214,7 +253,8 @@ def main(argv: list[str] | None = None) -> int:
         if manifest_data
         else False,
     }
-    backend = "sf3d" if args.fast else "trellis2" if args.trellis else "hunyuan-comfyui"
+    backend = ("sf3d" if args.fast else "trellis2" if args.trellis
+               else "hi3d" if args.hi3d else "hunyuan-comfyui")
     policy = manifest_data.get("license_policy", {}) if manifest_data else {}
     try:
         profile = validate_run_policy(
@@ -285,6 +325,22 @@ def main(argv: list[str] | None = None) -> int:
             trellis_texture_backend = trellis_result.texture_backend
             trellis_material_normalized = trellis_result.material_normalized
             trellis_material_mode = trellis_result.material_mode
+        elif args.hi3d:
+            # Hi3D is a pair of stages: a coarse mesh, then refinement. Running it from
+            # this CLI means the coarse half runs here too, in the same interpreter, which
+            # is why this is one backtick and not two commands for the user to sequence.
+            from .hi3d_backend import generate_hi3d
+
+            result = generate_hi3d(
+                image,
+                working_output_dir,
+                repo=args.hi3d_repo,
+                coarse_mesh=args.coarse_mesh,
+                resolution=args.resolution,
+                steps=args.hi3d_steps,
+                coarse_steps=args.coarse_steps,
+                seed=args.seed,
+            )
         else:
             if args.workflow is None:
                 raise ValueError(
@@ -324,6 +380,10 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "steps": args.steps if args.trellis else None,
         "pre_simplify_cap": args.trellis_pre_simplify_cap if args.trellis else None,
+        "resolution": args.resolution if args.hi3d else None,
+        "hi3d_steps": args.hi3d_steps if args.hi3d else None,
+        "coarse_steps": args.coarse_steps if args.hi3d else None,
+        "coarse_mesh": str(args.coarse_mesh) if args.hi3d and args.coarse_mesh else None,
     }
     result, sidecar = finalize_output(
         generated=result,
@@ -335,7 +395,10 @@ def main(argv: list[str] | None = None) -> int:
         parameters=parameters,
         source_manifest=source_manifest,
         backend_repo=(
-            args.sf3d_repo if args.fast else args.trellis_repo if args.trellis else None
+            args.sf3d_repo if args.fast
+            else args.trellis_repo if args.trellis
+            else args.hi3d_repo if args.hi3d
+            else None
         ),
     )
     print(result)

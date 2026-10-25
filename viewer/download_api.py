@@ -77,6 +77,10 @@ COMMANDS: dict[str, list[str]] = {
     # vendor/hunyuan-rocm/ and a machine with both cards keeps both installs.
     "hunyuan-rocm": [sys.executable, str(REPO / "scripts" / "bootstrap_hunyuan_rocm.py"),
                      "--yes"],
+    # NVIDIA-only, and its own venv: Hi3D's pinned torch (cu128, for Blackwell) is newer
+    # than the one Hunyuan-cuda builds against. One host, so it lives here rather than in
+    # HOST_COMMANDS, the way hunyuan-cuda does.
+    "hi3d": [sys.executable, str(REPO / "scripts" / "bootstrap_hi3d.py"), "--yes"],
 }
 
 # Where a route installs differently per machine, the machine's own command wins. TRELLIS.2
@@ -116,10 +120,19 @@ def command_for(backend_id: str, host: str | None = None,
 def building_label(backend_id: str, host: str | None = None) -> str:
     """What a setup with no bytes to measure is doing, for the progress line."""
     here = host or _this_host()
-    if (backend_id, here) in HOST_COMMANDS or backend_id == "hunyuan-cuda":
+    if (backend_id, here) in HOST_COMMANDS or backend_id in {"hunyuan-cuda", "hunyuan-rocm"}:
         if here == AMD:
             return "building the ROCm version"
         return "building the CUDA version"
+    # Hi3D is NVIDIA-only and lives in COMMANDS, but it is a CUDA build with a multi-minute
+    # venv, so it must not be labelled as the Metal port.
+    if backend_id == "hi3d":
+        return "building the CUDA version"
+    # A Colab route has no local build at all: its install happens on the VM, once per
+    # session, and is reported by the remote wrapper. Saying "Metal port" here would be a
+    # straight lie about a machine that is not this one.
+    if backend_id.startswith("colab-"):
+        return "installing on the rented GPU"
     return "building the Metal port"
 
 
