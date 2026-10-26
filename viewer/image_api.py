@@ -317,6 +317,7 @@ class ImageJob:
     settings: dict[str, Any]
     reference: Path | None = None   # an edit: Qwen reads this picture (a back view's front)
     mode: str = "edit (back view)"  # what kind of edit, for the provenance record
+    remote: bool = False            # drawn on a rented Colab GPU, not here
 
     def __post_init__(self) -> None:
         self.status = "queued"
@@ -372,7 +373,8 @@ class ImageJobManager:
         self.active: str | None = None
 
     def create(self, prompt: str, settings: dict[str, Any], output_path: Path | None = None,
-               reference: Path | None = None, mode: str = "edit (back view)") -> ImageJob:
+               reference: Path | None = None, mode: str = "edit (back view)",
+               remote: bool = False) -> ImageJob:
         with self.lock:
             if self.active is not None:
                 running = self.jobs.get(self.active)
@@ -440,16 +442,53 @@ def back_source(output_root: Path, relative: str) -> Path:
     return path
 
 
+def remote_command(job: ImageJob) -> list[str]:
+    """The supervisor invocation that draws this job's picture on a rented GPU.
+
+    The request travels as a small JSON in the supervisor's "image" slot -- a text-to-
+    picture run has no input picture -- and the PNG comes back to `job.output_path`, where
+    the local path would have written it. Same protocol either way, which is why nothing
+    downstream (the provenance sidecar, the chain's next step) has to know.
+    """
+    request = job.directory / "colab_request.json"
+    request.write_text(json.dumps({"prompt": job.prompt, "settings": job.settings}))
+    return [
+        sys.executable, "-u", str(REPO / "scripts" / "colab_generate.py"),
+        str(request), str(job.output_path), "--backend", "qwen_image", "--yes",
+    ]
+
+
+def picture_route(binary: Path = BINARY, colab: bool | None = None) -> str:
+    """Where a picture gets drawn: `local`, `colab`, or `none` (nobody can).
+
+    The Colab fallback exists for the machine with no local models at all: the whole point
+    of the hosted engines. It is checked here, once, so the HTTP handler cannot disagree
+    with itself about whether a missing sd-cli is fatal.
+    """
+    if binary.exists():
+        return "local"
+    if colab is None:
+        import backend_catalog
+
+        colab = backend_catalog.colab_ready()
+    return "colab" if colab else "none"
+
+
 def run_job(job: ImageJob, manager: ImageJobManager,
             weights: dict[str, Path] | None = None) -> None:
     """Drive one sd-cli run to completion, emitting progress as it goes."""
     try:
-        weights = weights or resolve_weights()
-        vision = resolve_vision() if job.reference else None
-        if job.reference and vision is None:
-            raise MissingWeights([VISION_FILE[1]])
-        command = job_command(job, weights, vision)
-        job.set_status("running", total_steps=job.settings["steps"])
+        if job.remote:
+            command = remote_command(job)
+            vision = None
+            job.set_status("running", total_steps=job.settings["steps"])
+        else:
+            weights = weights or resolve_weights()
+            vision = resolve_vision() if job.reference else None
+            if job.reference and vision is None:
+                raise MissingWeights([VISION_FILE[1]])
+            command = job_command(job, weights, vision)
+            job.set_status("running", total_steps=job.settings["steps"])
         started = time.monotonic()
         job.process = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -462,7 +501,9 @@ def run_job(job: ImageJob, manager: ImageJobManager,
         # and an AMD user watching a twenty-minute grind on an idle card deserves the
         # same one-line explanation.
         platform = host_platform()
-        watch = BackendWatch() if platform != APPLE else None
+        # The no-GPU watch reads *local* sd-cli chatter; on a remote run the lines are the
+        # supervisor's and a false match would kill a job whose GPU is fine.
+        watch = BackendWatch() if platform != APPLE and not job.remote else None
         no_gpu = False
         buffer = b""
         while True:
@@ -497,7 +538,8 @@ def run_job(job: ImageJob, manager: ImageJobManager,
                            log="\n".join(list(job.log_lines)[-12:]))
         elif code != 0 or not job.output_path.exists():
             reason = failure_reason(job.log_lines)
-            job.error = f"sd-cli exited with code {code}"
+            job.error = ("the Colab picture run failed" if job.remote
+                         else f"sd-cli exited with code {code}")
             if reason:
                 job.error += f": {reason}"
             job.set_status("error", error=job.error,
@@ -539,8 +581,8 @@ def start_edit(reference: Path, output_path: Path, prompt: str, seed: int,
     return job
 
 
-def start(prompt: str, raw_settings: dict[str, Any]) -> ImageJob:
+def start(prompt: str, raw_settings: dict[str, Any], *, remote: bool = False) -> ImageJob:
     settings = clean_settings(raw_settings)
-    job = MANAGER.create(prompt, settings)
+    job = MANAGER.create(prompt, settings, remote=remote)
     threading.Thread(target=run_job, args=(job, MANAGER), daemon=True).start()
     return job

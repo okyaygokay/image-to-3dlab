@@ -18,8 +18,6 @@ for _path in (REPO, str(REPO / "scripts")):
 
 import bootstrap_pixal3d_colab as boot
 
-from image_to_3dlab import host
-
 
 def test_the_announcement_names_the_backend_the_route_the_size_and_the_licence():
     """AGENTS.md: name the backend, name the route, state the size, require an answer."""
@@ -40,21 +38,23 @@ def test_the_venv_interpreter_path_is_not_doubled():
     assert python.parent.parent == boot.VENV
 
 
-def test_the_venv_lock_keeps_the_wrapper_s_dependencies_and_drops_cuda():
-    """The venv runs `pixal3d_generate.py` and `bootstrap_pixal3d.py`, nothing else.
+def test_the_venv_lock_keeps_the_wrapper_s_dependencies_and_heros_upscaler():
+    """The venv runs `pixal3d_generate.py`, `bootstrap_pixal3d.py` and Hero's upscale.
 
-    torch is dead weight a GGML runtime cannot load, and the NVIDIA wheels behind a PyPI
-    torch are gigabytes of it; but the packages both scripts import must survive the
-    strip, or the first job on the VM dies at `import rembg` minutes into a paid session.
+    torch is dead weight to a Pixal3D generation (GGML, not PyTorch), but the Hero face
+    route upscales its head crop on this same VM through `image_to_3dlab/upscale.py`, so
+    torch must stay or Hero breaks on exactly the machine it was routed to. The packages
+    the wrapper imports must all be there too, or the first job dies at `import rembg`
+    minutes into a paid session.
     """
-    stripped = host.without_cuda((REPO / "requirements.lock").read_text())
     names = {line.split("==")[0].strip().split(";")[0].strip()
-             for line in stripped.splitlines() if "==" in line and not line.startswith("#")}
-    for wanted in ("pillow", "numpy", "rembg", "onnxruntime", "trimesh", "huggingface-hub"):
+             for line in (REPO / "requirements.lock").read_text().splitlines()
+             if "==" in line and not line.startswith("#")}
+    for wanted in ("pillow", "numpy", "rembg", "onnxruntime", "trimesh", "huggingface-hub",
+                   "torch"):
         assert wanted in names, f"{wanted} was stripped from the Colab venv"
-    for banned in ("torch", "triton"):
-        assert banned not in names, f"{banned} would still be installed on the VM"
-    assert not any(name.startswith("nvidia-") for name in names)
+    # And the lock's CUDA wheels ride along with torch, so the upscale has a GPU to use.
+    assert any(name.startswith("nvidia-") for name in names)
 
 
 def test_it_refuses_to_download_without_yes_when_nobody_can_answer(monkeypatch, capsys):

@@ -10,6 +10,7 @@ are pinned here.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -288,3 +289,151 @@ def test_a_clean_exit_that_forgot_to_say_done_is_recorded(tmp_path):
     written = json.loads(status.read_text())
     assert written["state"] == "done"
     assert written["output"] == "/content/i2l/outputs/out.glb"
+
+
+# --- the run's side files come back with the GLB -------------------------------------------
+
+
+def test_only_pixal3d_declares_artifacts_and_the_others_declare_none():
+    """The other wrappers write nothing Finish needs, so their runs must not go looking."""
+    assert cg.BACKENDS["pixal3d"]["artifacts"] == (".json", ".post.bin", ".svviews")
+    for backend, spec in cg.BACKENDS.items():
+        if backend != "pixal3d":
+            assert not spec.get("artifacts"), f"{backend} declares artifacts it never wrote"
+
+
+def _fake_colab(remote_files: dict, calls: list):
+    """A `colab.run` that 'downloads' by copying preloaded bytes, and records every call."""
+    def run(argv, **_kwargs):
+        calls.append(argv)
+        if argv[0] == "download":
+            remote, local = argv[1], Path(argv[2])
+            payload = remote_files.get(remote.rsplit("/", 1)[-1])
+            if payload is None:
+                raise cg.colab.ColabError(f"404 {remote}")
+            local.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(payload, bytes):
+                local.write_bytes(payload)
+            else:  # a whole directory, pre-materialised by the test
+                shutil.copytree(payload, local, dirs_exist_ok=True)
+        return ""
+    return run
+
+
+def test_fetch_artifacts_beside_the_glb_and_marks_the_record(monkeypatch, tmp_path):
+    """Finish matches a model to its run by the record's sha256 and looks for the views
+    beside it, so the side files must land with the same stem as the local GLB -- and the
+    record must say it was made on a VM, because Hero routes its Pixal3D calls by that."""
+    import io
+    import tarfile as tar
+
+    views = tmp_path / "vmviews"
+    views.mkdir()
+    (views / "transforms.json").write_text("{}")
+    bundle = io.BytesIO()
+    with tar.open(fileobj=bundle, mode="w") as archive:
+        archive.add(views / "transforms.json", arcname="transforms.json")
+
+    record = json.dumps({"backend": "pixal3d",
+                         "output": {"path": "/content/i2l/outputs/x.glb", "sha256": "a" * 64}})
+    remote_files = {"x.json": record.encode(), "x.post.bin": b"DUMP",
+                    "x.svviews.tar": bundle.getvalue()}
+    calls: list = []
+    monkeypatch.setattr(cg.colab, "run", _fake_colab(remote_files, calls))
+
+    local = tmp_path / "runs" / "x.glb"
+    local.parent.mkdir(parents=True)
+    brought = cg.fetch_artifacts("s", "pixal3d", "/content/i2l/outputs/x.glb", local,
+                                 scratch=tmp_path / "scratch")
+
+    assert [p.name for p in brought] == ["x.json", "x.post.bin", "x.svviews"]
+    marked = json.loads((tmp_path / "runs" / "x.json").read_text())
+    assert marked["host"] == "colab" and marked["backend"] == "pixal3d"
+    assert (tmp_path / "runs" / "x.post.bin").read_bytes() == b"DUMP"
+    assert ((tmp_path / "runs" / "x.svviews") / "transforms.json").is_file()
+    # The directory was packed on the VM first; the REST API only moves files.
+    assert any(argv[0] == "exec" and "make_archive" in str(argv) for argv in calls) or \
+        any("exec" in str(argv) for argv in calls)
+
+
+def test_a_missing_artifact_is_skipped_not_fatal(monkeypatch, tmp_path):
+    """A wrapper that wrote no dump (an unpatched build) must not fail a good run."""
+    remote_files = {"x.json": json.dumps({"backend": "pixal3d"}).encode()}
+    monkeypatch.setattr(cg.colab, "run", _fake_colab(remote_files, []))
+    local = tmp_path / "x.glb"
+    local.parent.mkdir(parents=True, exist_ok=True)
+    brought = cg.fetch_artifacts("s", "pixal3d", "/content/i2l/outputs/x.glb", local,
+                                 scratch=tmp_path / "scratch")
+    assert [p.name for p in brought] == ["x.json"]
+    assert not (tmp_path / "x.post.bin").exists()
+    assert not (tmp_path / "x.svviews").exists()
+
+
+def test_a_backend_without_artifacts_fetches_nothing(monkeypatch, tmp_path):
+    calls: list = []
+    monkeypatch.setattr(cg.colab, "run", _fake_colab({}, calls))
+    local = tmp_path / "x.glb"
+    local.parent.mkdir(parents=True, exist_ok=True)
+    assert cg.fetch_artifacts("s", "hi3d", "/content/i2l/outputs/x.glb", local) == []
+    assert calls == []
+
+
+# --- one repo script on the VM (--exec) ------------------------------------------------------
+
+
+def test_exec_mode_substitutes_the_placeholders_and_lands_the_output(monkeypatch, tmp_path):
+    """Hero's crop upscale rides this: `{in}`/`{out}` must become remote paths, the script
+    must run in the backend's own venv, and its output must land where the caller said."""
+    launched: dict = {}
+
+    def fake_launch(session, backend, argv, output_remote):
+        launched["argv"] = argv
+        launched["out"] = output_remote
+        return "/content/i2l/jobs/1"
+
+    monkeypatch.setattr(cg, "launch_remote_argv", fake_launch)
+    monkeypatch.setattr(cg, "wait_for_remote_job", lambda *a, **k: {"state": "done"})
+    monkeypatch.setattr(cg.colab, "ensure_session", lambda *a, **k: None)
+    monkeypatch.setattr(cg.colab, "stop_idle_sessions", lambda **k: iter([]))
+    monkeypatch.setattr(cg.colab, "warm_session", lambda backend: None)
+    monkeypatch.setattr(cg, "ensure_remote_setup", lambda *a, **k: None)
+    monkeypatch.setattr(cg, "sync_tree", lambda *a, **k: None)
+
+    def fake_run(argv, **_kwargs):
+        if argv[0] == "download":
+            Path(argv[2]).write_bytes(b"PNG")   # the CLI writes the file it fetched
+        return ""
+
+    monkeypatch.setattr(cg.colab, "run", fake_run)
+
+    crop = tmp_path / "crop.png"
+    crop.write_bytes(b"crop")
+    out = tmp_path / "crop_up.png"
+    rc = cg.main(["--backend", "pixal3d", "--exec", "scripts/upscale_esrgan.py",
+                  "--exec-input", str(crop), "--exec-output", str(out), "--yes",
+                  "--", "{in}", "{out}", "--size", "1024"])
+    assert rc == 0
+    argv = launched["argv"]
+    assert argv[0] == cg.REMOTE_PYTHON["pixal3d"]
+    assert argv[1] == "/content/i2l/scripts/upscale_esrgan.py"
+    assert argv[2] == "/content/i2l/inputs/crop.png"
+    assert argv[3] == launched["out"] == "/content/i2l/outputs/crop_up.png"
+    assert argv[4:] == ["--size", "1024"]
+    assert out.read_bytes() == b"PNG"
+
+
+def test_exec_mode_refuses_without_an_output_or_with_generation_positionals(tmp_path, capsys):
+    crop = tmp_path / "crop.png"
+    crop.write_bytes(b"crop")
+    assert cg.main(["--backend", "pixal3d", "--exec", "scripts/upscale_esrgan.py",
+                    "--exec-input", str(crop), "--yes"]) == 2
+    assert "--exec-output" in capsys.readouterr().err
+    assert cg.main(["--backend", "pixal3d", "--exec", "scripts/upscale_esrgan.py",
+                    "--exec-input", str(crop), "--exec-output", str(tmp_path / "o.png"),
+                    "in.png", "--yes"]) == 2
+    assert "replaces" in capsys.readouterr().err
+
+
+def test_generate_mode_still_requires_image_and_output(capsys):
+    assert cg.main(["--backend", "hi3d", "--yes"]) == 2
+    assert "image and an output GLB" in capsys.readouterr().err

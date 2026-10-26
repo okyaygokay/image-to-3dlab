@@ -56,6 +56,9 @@ from autorig_api import (
     cancel_job as cancel_animate_job,
 )
 from autorig_api import (
+    colab_ready as autorig_colab_ready,
+)
+from autorig_api import (
     installed as autorig_installed,
 )
 from autorig_api import (
@@ -3165,7 +3168,12 @@ class Handler(SimpleHTTPRequestHandler):
                 "error": f"prompt is longer than {image_api.MAX_PROMPT} characters"
             })
             return
-        if not image_api.BINARY.exists():
+        # Where the picture gets drawn: here when the engine is installed, on a rented GPU
+        # when it is not and the Colab CLI is signed in, nowhere (a 503 that says how to
+        # fix it) when neither. Decided once, up front, so the rest of the handler cannot
+        # half-agree with itself about whether a missing sd-cli is fatal.
+        route = image_api.picture_route()
+        if route == "none":
             self._send_json(503, {
                 "error": "stable-diffusion.cpp is not installed (vendor/sdcpp/sd-cli).",
                 "needs_setup": True,
@@ -3175,14 +3183,16 @@ class Handler(SimpleHTTPRequestHandler):
         if waiting:
             self._send_json(409, {"error": waiting})
             return
+        if route == "local":
+            try:
+                image_api.resolve_weights()
+            except image_api.MissingWeights as exc:
+                self._send_json(503, {"error": str(exc), "needs_setup": True,
+                                      "missing": exc.missing})
+                return
         try:
-            image_api.resolve_weights()
-        except image_api.MissingWeights as exc:
-            self._send_json(503, {"error": str(exc), "needs_setup": True,
-                                  "missing": exc.missing})
-            return
-        try:
-            job = image_api.start(prompt, payload.get("settings") or {})
+            job = image_api.start(prompt, payload.get("settings") or {},
+                                  remote=route == "colab")
         except RuntimeError as exc:
             self._send_json(409, {"error": str(exc)})
             return
@@ -3865,8 +3875,9 @@ class Handler(SimpleHTTPRequestHandler):
         waiting = busy_reason("animate")
         if waiting:
             return waiting
-        if not autorig_installed():
-            return "Auto-rig is not installed. Set it up on the Setup & Status page."
+        if not autorig_installed() and not autorig_colab_ready():
+            return ("Auto-rig is not installed. Set it up on the Setup & Status page, or "
+                    "sign in to Colab (colab sessions) to rig on a rented GPU.")
         return None
 
     def _start_animate(self, job) -> None:

@@ -214,6 +214,35 @@ def rig_commands(source: Path, result: Path) -> list[tuple[list[str], Path]]:
     ]
 
 
+def colab_ready() -> bool:
+    """Whether a rented-GPU rig is possible: the CLI is installed and an account answers."""
+    import backend_catalog
+
+    return backend_catalog.colab_ready()
+
+
+def remote_rig_commands(source: Path, result: Path) -> list[tuple[list[str], Path]]:
+    """The rig, on a rented GPU: one supervisor run instead of the local venv.
+
+    Used when the local rigger is not installed at all -- the machine whose every model
+    lives on Colab. Same input, same result path, so the job runner and the records do
+    not change shape.
+    """
+    supervisor = REPO / "scripts" / "colab_generate.py"
+    return [([sys.executable, "-u", str(supervisor), str(source), str(result),
+              "--backend", "autorig", "--yes"], REPO)]
+
+
+def remote_animate_commands(rigged: Path, preset_id: str, result: Path,
+                            spread: float, pace: float) -> list[tuple[list[str], Path]]:
+    """A preset clip, on the same rented GPU that rigged the model."""
+    supervisor = REPO / "scripts" / "colab_generate.py"
+    return [([sys.executable, "-u", str(supervisor), str(rigged), str(result),
+              "--backend", "autorig", "--yes",
+              "--", "--preset", preset_id, "--arm-spread", str(spread),
+              "--speed", str(pace)], REPO)]
+
+
 def animate_command(rigged: Path, motion: Path, result: Path, arm_spread: float,
                     speed: float = 1.0) -> list[str]:
     return [str(venv_python()), str(RETARGET), "--rig", str(rigged), "--motion", str(motion),
@@ -326,8 +355,12 @@ class AnimateJobManager:
             source_glb = directory / "input" / "source.glb"
             source_glb.write_bytes(data)
             result = directory / f"{stem}_rigged.glb"
+            # A machine with no local rigger rigs on a rented GPU instead: same job shape,
+            # one supervisor command in place of the venv's two.
+            commands = (rig_commands(source_glb, result) if installed() or not colab_ready()
+                        else remote_rig_commands(source_glb, result))
             job = AnimateJob(uuid.uuid4().hex, "rig", directory, result,
-                             rig_commands(source_glb, result), RIG_SECONDS,
+                             commands, RIG_SECONDS,
                              rig_record(name, data, source, origin))
             return self._claim(job)
 
@@ -349,9 +382,12 @@ class AnimateJobManager:
             record = animation_record(_read_json(rigged.with_suffix(".provenance.json")),
                                       preset, spread)
             record["motion"]["speed"] = pace
+            commands = ([(animate_command(rigged, self.motions / f"{preset_id}.npz",
+                                          result, spread, pace), REPO)] if installed()
+                        or not colab_ready()
+                        else remote_animate_commands(rigged, preset_id, result, spread, pace))
             job = AnimateJob(uuid.uuid4().hex, "animate", run, result,
-                             [(animate_command(rigged, self.motions / f"{preset_id}.npz",
-                                               result, spread, pace), REPO)],
+                             commands,
                              ANIMATE_SECONDS, record)
             return self._claim(job)
 

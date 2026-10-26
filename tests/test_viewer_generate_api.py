@@ -2064,7 +2064,7 @@ def test_hi3d_readiness_names_the_bootstrap_when_not_installed(monkeypatch, tmp_
     assert "bootstrap_hi3d.py" in status["build"]["hint"]
 
 
-def test_a_colab_engine_is_offered_where_no_nvidia_card_exists():
+def test_a_colab_engine_is_offered_where_no_nvidia_card_exists(monkeypatch):
     """The point of the Colab routes: a Mac with no NVIDIA card must see them.
 
     The picker filters on `kind == "3d"` and `state == "ready"`, so a route whose readiness
@@ -2072,6 +2072,10 @@ def test_a_colab_engine_is_offered_where_no_nvidia_card_exists():
     """
     import backend_catalog
 
+    # The suite fakes the Colab CLI as signed out (conftest); this test is exactly about
+    # the signed-in state, so switch the probe on here.
+    monkeypatch.setattr(backend_catalog, "_probe_colab", lambda *_a, **_k: True)
+    backend_catalog.forget_colab_readiness()
     offered = [b for b in backend_catalog.catalog_status(host=backend_catalog.APPLE)["backends"]
                if b["kind"] == "3d" and b["state"] == "ready"]
     ids = {b["id"] for b in offered}

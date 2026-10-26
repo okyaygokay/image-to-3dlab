@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Every studio step now runs on a rented GPU — a Mac with nothing installed is a whole
+  lab.** Three gaps closed, all behind the same `colab` CLI:
+  - *What a Colab Pixal3D run brings back.* The supervisor now downloads the run's record
+    (`.json`), clean-up dump (`.post.bin`) and cameras (`.svviews/`) beside the GLB, so
+    Finish's Pixel Match and the Pixal3D retopo route work on Colab-made models, not just
+    the classic one. The record is marked `"host": "colab"` on the way in.
+  - *Hero face on Colab models.* The route gained `--pixal colab`: the head build, the
+    Real-ESRGAN crop upscale and the head clean-up all ride the supervisor (the VM's venv
+    now keeps torch for the upscale, and `--exec`/`--exec-bin` run one repo script or
+    binary on a VM). Create offers Hero face for both Pixal3D engines.
+  - *The picture step* (Create's "start from a description") draws through Qwen-Image on a
+    rented GPU when no local sd-cli exists (`qwen_image_colab.py`; the VM compiles the
+    pinned stable-diffusion.cpp commit with CUDA — upstream ships no Linux CUDA build).
+  - *The Animate tab* rigs and plays presets through SkinTokens on a rented GPU when the
+    local rigger is missing (`autorig_colab.py`), with the same job shape and records.
+
 ### Fixed
 - **Finish's retopology accepts a model with no texture.** Hi3D emits geometry plus a flat
   colour (`baseColorFactor`) and leaves painting to a later stage, so running Finish on its

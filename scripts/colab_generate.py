@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import sys
+import tarfile
 import time
 from pathlib import Path
 
@@ -68,6 +69,25 @@ BACKENDS: dict[str, dict[str, str]] = {
         "setup": "scripts/bootstrap_pixal3d_colab.py",
         "wrapper": "scripts/pixal3d_generate.py",
         "label": "Pixal3D (C++/GGML)",
+        # Written beside the GLB on the VM, and needed after the run: the record and views
+        # are what Finish's Pixel Match matches by, the dump is what its Pixal3D route
+        # reruns, and Hero reuses all three. Without them a Colab-made model could be
+        # finished, but only the classic way, with no photo and no hero head.
+        "artifacts": (".json", ".post.bin", ".svviews"),
+    },
+    # The picture engine: text-to-image, so its "image" slot carries the request JSON and
+    # its output is a PNG. Upstream has no Linux CUDA prebuilt, so its setup compiles.
+    "qwen_image": {
+        "setup": "scripts/bootstrap_qwen_image_colab.py",
+        "wrapper": "scripts/qwen_image_colab.py",
+        "label": "Qwen-Image (text to picture)",
+    },
+    # The auto-rigger: a rig with no forwarded flags, a preset clip with --preset. The
+    # wrapper runs the local route's own commands, against the VM's SkinTokens install.
+    "autorig": {
+        "setup": "scripts/bootstrap_autorig_colab.py",
+        "wrapper": "scripts/autorig_colab.py",
+        "label": "Auto-rig (SkinTokens)",
     },
 }
 
@@ -79,6 +99,8 @@ REMOTE_PYTHON = {
     "hunyuan_cuda": f"{REMOTE_ROOT}/vendor/hunyuan-cuda/.venv/bin/python",
     "trellis_cuda": f"{REMOTE_ROOT}/vendor/trellis-cuda/.venv/bin/python",
     "pixal3d": f"{REMOTE_ROOT}/vendor/pixal3d-cpp/.venv/bin/python",
+    "qwen_image": f"{REMOTE_ROOT}/vendor/sdcpp/.venv/bin/python",
+    "autorig": f"{REMOTE_ROOT}/vendor/SkinTokens/.venv/bin/python",
 }
 
 #: The stamp a setup writes when it is done, so a warm session skips 20 minutes of install.
@@ -98,8 +120,8 @@ def emit(line: str) -> None:
 #: Directories under the repo that a remote run needs. Only Python sources and the
 #: requirements file go up: `output/`, `characters/` and `vendor/` are this machine's own
 #: work or multi-gigabyte checkouts the VM builds for itself.
-SYNC_DIRS = ("image_to_3dlab", "scripts")
-SYNC_FILES = ("requirements.txt",)
+SYNC_DIRS = ("image_to_3dlab", "scripts", "viewer")
+SYNC_FILES = ("requirements.txt", "requirements.lock")
 
 
 def _sync_archive(destination: Path) -> Path:
@@ -118,6 +140,14 @@ def _sync_archive(destination: Path) -> Path:
             if not folder.is_dir():
                 continue
             for item in sorted(folder.rglob("*.py")):
+                archive.add(item, arcname=str(item.relative_to(REPO)))
+        # The animation presets: small .npz clips the remote retarget reads. Only these
+        # binaries ride along -- the sync exists to run code, and every other file the
+        # wrappers need is either a weight (installed by the VM's own bootstrap) or an
+        # input (uploaded per job).
+        motions = REPO / "image_to_3dlab" / "motions"
+        if motions.is_dir():
+            for item in sorted(motions.glob("*.npz")):
                 archive.add(item, arcname=str(item.relative_to(REPO)))
         for name in SYNC_FILES:
             item = REPO / name
@@ -170,10 +200,23 @@ def ensure_remote_setup(session: str, backend: str, *, skip: bool) -> None:
     log("this is the slow part: 15-30 minutes, and it happens once per VM, not once per job")
     # --yes: the confirmation is the announcement above, made locally. Asking again on a
     # stdin nobody is attached to would hang the job.
+    # The subprocess's output is captured and reprinted by the kernel itself, because the
+    # exec channel only relays the kernel's own prints -- a bootstrap's stdout and stderr
+    # (including the one line that says why it died) otherwise never cross the websocket,
+    # which is exactly how a real failure surfaced as a bare "SETUP_EXIT 1" with nothing
+    # to act on. The tail is bounded: progress bars are noise, the end is where uv and the
+    # bootstraps say what went wrong. The two marker lines before it (kernel version,
+    # script size) pin down the "ran nothing at all" class of failure in one shot.
     code = (
-        f"import subprocess, sys\n"
-        f"p = subprocess.run([sys.executable, {REMOTE_ROOT + '/' + spec['setup']!r}, "
-        f"'--yes'], cwd={REMOTE_ROOT!r})\n"
+        f"import os, subprocess, sys\n"
+        f"script = {REMOTE_ROOT + '/' + spec['setup']!r}\n"
+        f"print('SETUP_PY', sys.version.split()[0], sys.executable)\n"
+        f"print('SETUP_SCRIPT', os.path.exists(script),\n"
+        f"      os.path.getsize(script) if os.path.exists(script) else -1)\n"
+        f"p = subprocess.run([sys.executable, script, '--yes'], cwd={REMOTE_ROOT!r},\n"
+        f"                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,\n"
+        f"                   text=True, errors='replace')\n"
+        f"print(p.stdout[-12000:])\n"
         f"print('SETUP_EXIT', p.returncode)\n"
     )
     output = colab.run(["exec", "-s", session, "--timeout", "3600"],
@@ -182,7 +225,8 @@ def ensure_remote_setup(session: str, backend: str, *, skip: bool) -> None:
     # filtered to a few prefixes and threw away the one line saying why the install failed,
     # leaving "SETUP_EXIT 1" and nothing else to act on.
     for line in output.splitlines():
-        if line.startswith(("error", "  $", "echo", "Cannot", "This installs", "Refusing")):
+        if line.startswith(("error", "  $", "echo", "Cannot", "This installs",
+                            "Refusing", "SETUP_")):
             emit(line)
     if "SETUP_EXIT 0" not in output:
         raise colab.ColabError(
@@ -197,10 +241,20 @@ def launch_remote_job(session: str, backend: str, image_remote: str,
                       output_remote: str, extra: list[str]) -> str:
     """Start the wrapper detached on the VM; return the job's remote directory."""
     spec = BACKENDS[backend]
+    argv = [REMOTE_PYTHON[backend], f"{REMOTE_ROOT}/{spec['wrapper']}",
+            image_remote, output_remote, *extra]
+    return launch_remote_argv(session, backend, argv, output_remote)
+
+
+def launch_remote_argv(session: str, backend: str, argv: list[str],
+                       output_remote: str) -> str:
+    """Start one command detached on the VM; return the job's remote directory.
+
+    The command is the backend's wrapper for a generation, or any repo script for the
+    `--exec` mode (Hero's crop upscale rides this). The detachment and the waiter are the
+    same either way: a crash must read as a crash, whatever the command was.
+    """
     workdir = f"{REMOTE_ROOT}/jobs/{int(time.time() * 1000)}"
-    python = REMOTE_PYTHON[backend]
-    wrapper = f"{REMOTE_ROOT}/{spec['wrapper']}"
-    argv = [python, wrapper, image_remote, output_remote, *extra]
     payload = json.dumps({
         "workdir": workdir,
         "log": f"{workdir}/log.txt",
@@ -257,6 +311,67 @@ def _fetch_text(session: str, remote: str) -> str | None:
         scratch.unlink(missing_ok=True)
 
 
+def fetch_artifacts(session: str, backend: str, remote_output: str, local_output: Path,
+                    scratch: Path | None = None) -> list[Path]:
+    """Bring a run's side files back beside the GLB, so Finish can find them later.
+
+    Finish matches a model to its run *by content* -- it scans the local output tree for a
+    small record whose `output.sha256` matches the uploaded GLB -- so the artifacts must
+    land under the same local tree with the same stem, which is exactly where the local
+    route writes them. Missing ones are skipped quietly: a wrapper that wrote no dump (an
+    unpatched build, say) must not fail an otherwise good run. The record is marked
+    `"host": "colab"` while it is here, because Hero needs to know its Pixal3D calls must
+    ride the supervisor rather than a local binary.
+    """
+    spec = BACKENDS[backend]
+    suffixes = spec.get("artifacts", ())
+    if not suffixes:
+        return []
+    scratch = scratch or Path(os.environ.get("TMPDIR", "/tmp")) / f"i2l-artifacts-{os.getpid()}"
+    scratch.mkdir(parents=True, exist_ok=True)
+    stem = Path(remote_output).name.removesuffix(Path(remote_output).suffix)
+    brought: list[Path] = []
+    for suffix in suffixes:
+        remote = f"{Path(remote_output).parent}/{stem}{suffix}"
+        target = local_output.with_suffix(suffix)
+        if suffix == ".svviews":
+            # A directory: the REST contents API moves files, so pack it on the VM first.
+            archive = f"{Path(remote_output).parent}/{stem}.svviews.tar"
+            code = (f"import shutil\n"
+                    f"try:\n"
+                    f"    shutil.make_archive({archive.removesuffix('.tar')!r}, 'tar', {remote!r})\n"
+                    f"except (OSError, ValueError):\n"
+                    f"    raise SystemExit(3)\n")
+            try:
+                colab.run(["exec", "-s", session, "--timeout", "120"], stdin=code,
+                          timeout=180, attempts=2)
+                packed = scratch / f"{stem}.svviews.tar"
+                colab.run(["download", archive, str(packed), "-s", session], timeout=600)
+                target.mkdir(parents=True, exist_ok=True)
+                with tarfile.open(packed) as tar:
+                    tar.extractall(target)
+                packed.unlink(missing_ok=True)
+                brought.append(target)
+            except (colab.ColabError, tarfile.TarError, OSError):
+                continue
+        else:
+            try:
+                colab.run(["download", remote, str(target), "-s", session], timeout=600)
+            except colab.ColabError:
+                continue
+            if not target.is_file():
+                continue
+            if suffix == ".json" and target.stat().st_size <= 100_000:
+                try:
+                    record = json.loads(target.read_text())
+                    record["host"] = "colab"
+                    target.write_text(json.dumps(record, indent=2))
+                except (json.JSONDecodeError, OSError):
+                    pass  # the wrapper's own bytes are better than nothing; ship them as-is
+            brought.append(target)
+    return brought
+
+
 def wait_for_remote_job(session: str, workdir: str, *, timeout: int) -> dict:
     """Stream the remote log and return its final status."""
     printed = 0
@@ -311,8 +426,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("image", type=Path)
-    parser.add_argument("output", type=Path)
+    parser.add_argument("image", type=Path, nargs="?")
+    parser.add_argument("output", type=Path, nargs="?")
     parser.add_argument("--backend", choices=sorted(BACKENDS), default="hi3d")
     parser.add_argument("--accelerator", choices=colab.ACCELERATORS,
                         default=colab.DEFAULT_ACCELERATOR)
@@ -328,15 +443,52 @@ def main(argv: list[str] | None = None) -> int:
                         help="Skip the confirmation. The studio passes this once its own "
                              "dialog has asked.")
     parser.add_argument("--timeout", type=int, default=6 * 60 * 60)
-    # Everything the remote wrapper needs goes through untouched, so this file never has to
-    # learn a backend's flags. `parse_known_args` rather than `nargs=REMAINDER`: REMAINDER
-    # starts swallowing at the first positional, so `--yes` after the output path became a
-    # forwarded argument and the confirmation fired anyway (found by a real run).
-    args, extra = parser.parse_known_args(argv)
-    extra = [value for value in extra if value != "--"]
+    # One repo script run in the backend's venv on the VM, instead of a generation. Hero's
+    # head-crop upscale rides this when its Pixal3D calls are Colab-hosted: `{in}` and
+    # `{out}` in the forwarded args name the uploaded input and the fetched output, so the
+    # script itself never learns it is running remotely.
+    parser.add_argument("--exec", dest="exec_script", metavar="SCRIPT",
+                        help="Run SCRIPT on the VM in the backend's venv (with --exec-input/"
+                             "--exec-output and {in}/{out} placeholders in the forwarded args).")
+    parser.add_argument("--exec-input", type=Path, metavar="LOCAL",
+                        help="A local file to upload first; its remote path replaces {in}.")
+    parser.add_argument("--exec-output", type=Path, metavar="LOCAL",
+                        help="Where the remote output lands here; its remote path replaces {out}.")
+    parser.add_argument("--exec-bin", action="store_true",
+                        help="With --exec: run SCRIPT as a binary in the backend's install "
+                             "(e.g. vendor/pixal3d-cpp/build/post-replay), not under the venv's "
+                             "python. Hero's head clean-up rides this.")
+    # Everything the remote wrapper needs goes through untouched. The argv is split at the
+    # first `--` *before* parsing, not fished out of `parse_known_args` afterwards: with
+    # optional positionals (the `--exec` mode), argparse happily swallows the forwarded
+    # `{in} {out}` words as the image and output, and a known flag after `--` (say `--keep`)
+    # was consumed by this parser instead of forwarded -- both wrong in the same direction.
+    argv = list(sys.argv[1:]) if argv is None else list(argv)
+    split = argv.index("--") if "--" in argv else None
+    args, extra = parser.parse_known_args(argv if split is None else argv[:split])
+    extra = extra + ([] if split is None else argv[split + 1:])
 
-    if not args.image.is_file():
-        print(f"error: input image does not exist: {args.image}", file=sys.stderr)
+    if args.exec_script:
+        script = REPO / args.exec_script
+        if not script.is_file():
+            print(f"error: --exec script does not exist: {args.exec_script}", file=sys.stderr)
+            return 2
+        if args.exec_output is None:
+            print("error: --exec needs --exec-output (where the result lands here)",
+                  file=sys.stderr)
+            return 2
+        if args.image is not None or args.output is not None:
+            print("error: --exec replaces the image and output arguments", file=sys.stderr)
+            return 2
+        upload_source = args.exec_input
+    else:
+        if args.image is None or args.output is None:
+            print("error: an image and an output GLB are required unless --exec is used",
+                  file=sys.stderr)
+            return 2
+        upload_source = args.image
+    if upload_source is not None and not upload_source.is_file():
+        print(f"error: input file does not exist: {upload_source}", file=sys.stderr)
         return 2
 
     spec = BACKENDS[args.backend]
@@ -348,7 +500,8 @@ def main(argv: list[str] | None = None) -> int:
         session = colab.warm_session(args.backend)
         if session:
             log(f"reusing the warm session {session!r} (no install needed)")
-    session = session or colab.session_name(args.image.stem, args.backend)
+    stem = upload_source.stem if upload_source is not None else "exec"
+    session = session or colab.session_name(stem, args.backend)
     config = colab.RemoteConfig(
         session=session,
         accelerator=args.accelerator,
@@ -360,7 +513,9 @@ def main(argv: list[str] | None = None) -> int:
         config,
         backend_label=spec["label"],
         weights_gb=None,
-        workflow=f"{os.path.basename(spec['setup'])} then "
+        workflow=(os.path.basename(args.exec_script) + " through " +
+                  os.path.basename(spec['setup']) + "'s venv") if args.exec_script else
+                 f"{os.path.basename(spec['setup'])} then "
                  f"{os.path.basename(spec['wrapper'])}",
     ), flush=True)
     if not args.yes:
@@ -371,8 +526,14 @@ def main(argv: list[str] | None = None) -> int:
             print("Nothing started.")
             return 1
 
-    remote_image = f"{REMOTE_ROOT}/inputs/{args.image.name}"
-    remote_output = f"{REMOTE_ROOT}/outputs/{args.output.name}"
+    if args.exec_script:
+        remote_in = (f"{REMOTE_ROOT}/inputs/{args.exec_input.name}"
+                     if args.exec_input is not None else None)
+        remote_out = f"{REMOTE_ROOT}/outputs/{args.exec_output.name}"
+    else:
+        remote_in = f"{REMOTE_ROOT}/inputs/{args.image.name}"
+        remote_out = f"{REMOTE_ROOT}/outputs/{args.output.name}"
+    local_out = args.exec_output if args.exec_script else args.output
     workdir = None
     try:
         # Sessions are now kept for reuse, so something has to reap the ones nobody has
@@ -387,26 +548,40 @@ def main(argv: list[str] | None = None) -> int:
                         f"({REMOTE_ROOT + '/inputs'!r}, {REMOTE_ROOT + '/outputs'!r}, "
                         f"{REMOTE_ROOT + '/jobs'!r})]",
                   timeout=240)
-        colab.run(["upload", str(args.image), remote_image, "-s", session], timeout=600)
-        log(f"uploaded {args.image.name}")
+        if remote_in is not None:
+            colab.run(["upload", str(upload_source), remote_in, "-s", session], timeout=600)
+            log(f"uploaded {upload_source.name}")
         sync_tree(session)
         ensure_remote_setup(session, args.backend, skip=args.skip_setup)
 
-        workdir = launch_remote_job(session, args.backend, remote_image, remote_output, extra)
+        if args.exec_script:
+            forwarded = [value.replace("{in}", remote_in or "").replace("{out}", remote_out)
+                         for value in extra]
+            prefix = ([f"{REMOTE_ROOT}/{args.exec_script}"] if args.exec_bin
+                      else [REMOTE_PYTHON[args.backend], f"{REMOTE_ROOT}/{args.exec_script}"])
+            workdir = launch_remote_argv(session, args.backend, prefix + forwarded, remote_out)
+        else:
+            workdir = launch_remote_job(session, args.backend, remote_in, remote_out, extra)
         log(f"remote job started; watching {workdir}")
         status = wait_for_remote_job(session, workdir, timeout=args.timeout)
         if status.get("state") != "done":
             detail = status.get("error") or f"exit code {status.get('exit_code', '?')}"
             raise colab.ColabError(f"the remote run failed: {detail}")
 
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        colab.run(["download", remote_output, str(args.output), "-s", session], timeout=1800)
-        if not args.output.is_file():
+        local_out.parent.mkdir(parents=True, exist_ok=True)
+        colab.run(["download", remote_out, str(local_out), "-s", session], timeout=1800)
+        if not local_out.is_file():
             raise colab.ColabError(
-                f"the VM finished but {remote_output} did not come back. The file may be "
+                f"the VM finished but {remote_out} did not come back. The file may be "
                 f"missing; check with `colab ls -s {session} {REMOTE_ROOT}/outputs`."
             )
-        log(f"wrote {args.output}")
+        log(f"wrote {local_out}")
+        if not args.exec_script:
+            # A generation's side files, never an --exec helper's: the helper's output has
+            # no run record, and looking would cost three REST round-trips for 404s.
+            brought = fetch_artifacts(session, args.backend, remote_out, local_out)
+            if brought:
+                log(f"brought back {', '.join(part.name for part in brought)} beside the GLB")
         return 0
     except colab.ColabError as exc:
         if workdir:

@@ -243,6 +243,15 @@ def hero_command(job: FinishJob, settings: dict[str, Any]) -> list[str]:
     """The hero route on this run's model: its body is the asset's own Pixal3D model, its head
     is built again from a close crop. Everything it makes stays under steps/hero."""
     record = job.input_dir / "source.json"
+    # A Colab-made model means no trellis-cli on this machine: the route's Pixal3D calls
+    # (the head build, the crop upscale, the head clean-up) must ride the supervisor. Read
+    # from the copied-in record, which the supervisor marks `"host": "colab"` on the way in.
+    pixal = "local"
+    if record.is_file():
+        try:
+            pixal = "colab" if json.loads(record.read_text()).get("host") == "colab" else "local"
+        except (json.JSONDecodeError, OSError):
+            pass
     return [
         sys.executable, "-u", str(HERO_WORKER), str(job.image_path),
         "--out", str((job.steps_dir or job.directory) / "hero"),
@@ -250,6 +259,7 @@ def hero_command(job: FinishJob, settings: dict[str, Any]) -> list[str]:
         *(["--body-dump", str(job.dump_path)] if job.dump_path.is_file() else []),
         *(["--body-record", str(record)] if record.is_file() else []),
         "--body-faces", str(settings["faces"]),
+        "--pixal", pixal,
         "--result", str(job.result_glb),
     ]
 

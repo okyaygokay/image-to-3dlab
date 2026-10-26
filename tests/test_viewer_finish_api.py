@@ -729,3 +729,27 @@ def test_a_failed_hero_run_leads_with_its_own_reason():
              "[hero] cannot start, not installed: Hero face upscaler (Real-ESRGAN, 67 MB). Install them from the Setup page."]
     assert finish.failure_message(lines, 2).startswith("cannot start, not installed: Hero face upscaler")
     assert finish.failure_message(["Traceback ...", "boom"], 1) == "worker exited with code 1"
+
+
+def test_a_colab_made_model_sends_its_pixal3d_calls_to_the_rented_gpu(tmp_path):
+    """A model from the colab-pixal3d engine has no trellis-cli behind it on this machine,
+    so Hero's head build, crop upscale and head clean-up must ride the supervisor. The
+    signal is the `"host": "colab"` mark the supervisor writes into the run's record."""
+    _pixal3d_run(tmp_path / "generated")
+    run = tmp_path / "generated" / "seb" / "robot__pixal3d__1"
+    (run / "robot__pixal3d__1.post.bin").write_bytes(b"dump")
+    record = json.loads((run / "robot__pixal3d__1.json").read_text())
+    (run / "robot__pixal3d__1.json").write_text(
+        json.dumps({**record, "host": "colab", "post_dump": "robot__pixal3d__1.post.bin"}))
+    manager = finish.FinishJobManager(tmp_path / "finish", tmp_path / "generated")
+    job = manager.create("robot.glb", b"glb-bytes", b"png", {"hero": True, "faces": 32000})
+    command = finish.hero_command(job, job.settings)
+    assert command[command.index("--pixal") + 1] == "colab"
+
+
+def test_a_local_model_keeps_hero_local(tmp_path):
+    _pixal3d_run(tmp_path / "generated")
+    manager = finish.FinishJobManager(tmp_path / "finish", tmp_path / "generated")
+    job = manager.create("robot.glb", b"glb-bytes", b"png", {"hero": True, "faces": 32000})
+    command = finish.hero_command(job, job.settings)
+    assert command[command.index("--pixal") + 1] == "local"

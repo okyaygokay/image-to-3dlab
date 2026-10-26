@@ -38,13 +38,14 @@ that the session is warm; a second job is just the generation.
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--backend` | `hi3d` | `hi3d`, `hunyuan_cuda`, `trellis_cuda` or `pixal3d` |
+| `--backend` | `hi3d` | `hi3d`, `hunyuan_cuda`, `trellis_cuda`, `pixal3d`, `qwen_image` or `autorig` |
 | `--accelerator` | `G4` | `G4`, `A100`, `L4`, `T4`, `H100` |
 | `--session` | a warm one, else new | Use this VM by name (implies `--keep`) |
 | `--new-session` | off | Rent a fresh VM and pay the install again |
 | `--keep` | off | Leave the VM running when the job finishes |
 | `--skip-setup` | off | Trust an existing install on the VM |
 | `--yes` | off | Skip the confirmation (the studio passes this after its own dialog) |
+| `--exec` | off | Run one repo *script* on the VM instead of a generation (below) |
 
 ### Warm sessions
 
@@ -66,6 +67,48 @@ python scripts/colab_generate.py photo.png out.glb --backend pixal3d -- --seed 7
 
 Pixal3D runs at its one resolution (1024), so it has no detail flag; its first job on a
 fresh VM downloads 8.4 GB of weights (about ten minutes) instead of compiling anything.
+
+### `--exec`: one repo script on the VM
+
+The two non-generation backends need a way to run *part* of a route remotely:
+
+```bash
+# Hero's head-crop upscale, on the venv the pixal3d backend already installed
+python scripts/colab_generate.py --backend pixal3d --exec scripts/upscale_esrgan.py \
+    --exec-input crop.png --exec-output crop_up.png --yes -- {in} {out} --size 1024
+```
+
+`{in}` and `{out}` in the forwarded arguments are the remote paths of the uploaded input
+and the downloaded output, so the script itself never learns it is running remotely. With
+`--exec-bin`, the script runs as a raw binary from the backend's install (Hero's head
+clean-up: `vendor/pixal3d-cpp/build/post-replay`) instead of under the venv's Python.
+The setup, the detach, the waiter and the status polling are identical to a generation.
+
+### The picture step and the auto-rigger ride along too
+
+Two studio steps had no local engine on a Mac with nothing installed, and now fall back
+to this route instead of refusing:
+
+- **Qwen-Image** (Create's "start from a description"): `picture_route()` in
+  `viewer/image_api.py` picks the local sd-cli when it exists, a rented GPU when it does
+  not and the CLI is signed in, and only then refuses. The prompt and settings travel as
+  one small JSON in the supervisor's input slot; the drawing itself is built by the *same*
+  `build_command` the local route uses, imported on the VM by `scripts/qwen_image_colab.py`,
+  so the two cannot drift. Upstream publishes no Linux CUDA build of stable-diffusion.cpp,
+  so the VM compiles it from the pinned release commit (~10 minutes once).
+- **Auto-rig / Animate** (the Animate tab): when SkinTokens is not installed locally, the
+  rig runs as one supervisor job (`--backend autorig`), and the preset clips the same way.
+  The commands are the local route's own, built by `scripts/autorig_colab.py` on the VM.
+
+### What comes back with a Colab Pixal3D model
+
+A local Pixal3D run writes more than the GLB, and Finish needs exactly those files, so the
+supervisor downloads them beside the GLB: the run record (`.json`), the clean-up dump
+(`.post.bin`) and the camera views (`.svviews/`). The record is marked `"host": "colab"`
+on the way in — which is also how Hero knows to send its own Pixal3D calls (the head
+build, the crop upscale, the head clean-up) back to a rented GPU instead of looking for a
+trellis-cli this machine never had. Pixel Match works on Colab-made models for the same
+reason: the cameras are here now.
 
 ### Which accelerator
 
@@ -106,12 +149,13 @@ never gets downloaded.
 
 ## In the studio
 
-The three Colab routes appear as **first-class engines** in Create, on any machine:
+The four Colab routes appear as **first-class engines** in Create, on any machine:
 
 ```
 Hi3D 1.0 (Colab GPU)          ← recommended
 Hunyuan3D-2.1 (Colab GPU)
 TRELLIS.2 (Colab GPU)
+Pixal3D (Colab GPU)
 ```
 
 They are catalogue entries of their own rather than an option on a local engine, because
@@ -139,8 +183,9 @@ Renting a GPU changes where the code runs, not what you owe.
 
 ## Limits
 
-- **Linux/NVIDIA backends only.** The Mac-only routes (Pixal3D's Metal build, the
-  Hunyuan-MLX ports) install into this machine's interpreter and have no remote story.
+- **Linux/NVIDIA backends only.** The Mac-only Hunyuan-MLX ports install into this
+  machine's interpreter and have no remote story. (Pixal3D's runtime is C++/GGML, so its
+  prebuilt CUDA build runs on the VM even though the local route is a Mac one.)
 - **One job per session at a time.** The supervisor polls a single status file.
 - **No cost cap.** The three-hour idle rule bounds a forgotten session; it does not bound
   a long one. `--timeout` (default six hours) is the hard stop.

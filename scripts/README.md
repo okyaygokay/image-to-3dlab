@@ -49,6 +49,7 @@ game-ready LODs), start with [the prop sheet guide](../docs/prop-sheets.md).
 | `bootstrap_matte.py` | Install BiRefNet-lite, the background remover every backend uses once it is present. |
 | `bootstrap_upscaler.py` | Install Real-ESRGAN x4plus, the 4x upscaler Hero face uses on the head crop. |
 | `bootstrap_qwen_image.py` | Install the text-to-image route: a stable-diffusion.cpp binary and Qwen-Image weights. |
+| `bootstrap_qwen_image_colab.py` | Install Qwen-Image on a rented Colab VM: a CUDA sd-cli build, then its weights. |
 | `pixal3d_generate.py` | End-to-end Pixal3D generation: image -> textured GLB, on a Mac, NVIDIA or AMD. |
 | `hero_route.py` | Build a hero character: a full-body model with a high-detail head grafted on, as one GLB. |
 | `hero_blender.py` | Join a grafted head and body into one object, or render a check sheet, in a background Blender. |
@@ -61,6 +62,7 @@ game-ready LODs), start with [the prop sheet guide](../docs/prop-sheets.md).
 | `hunyuan_cuda_generate.py` | Full image -> textured GLB through Tencent's own Hunyuan3D-2.1 on an NVIDIA card. |
 | `colab_generate.py` | Run one backend on a rented Colab GPU and bring the GLB back. |
 | `colab_supervisor.py` | Wait for one detached job on the Colab VM and record how it ended. |
+| `qwen_image_colab.py` | Draw one picture with Qwen-Image on the VM, through the same sd-cli the local route runs. |
 | `hi3d_generate.py` | Image -> refined GLB through Hi3D v1.0, on an NVIDIA card. |
 | `hunyuan_rocm_generate.py` | Full image -> textured GLB through Tencent's own Hunyuan3D-2.1 on an AMD card. |
 | `hunyuan_mlx_generate.py` | End-to-end Hunyuan3D-MLX generation: image -> textured GLB. |
@@ -201,6 +203,8 @@ The `*_pose.py` files are pure curve maths with no `bpy`, which is why they have
 | `rignet_infer.py` | Run vendored RigNet inference on one of our own generated meshes. |
 | `arm_clearance.py` | Keep a retargeted character's arms out of its own body. |
 | `bootstrap_autorig.py` | Install the auto-rigger: SkinTokens (VAST-AI, MIT), which gives a humanoid mesh a skeleton and skin weights. |
+| `bootstrap_autorig_colab.py` | Install the auto-rigger on a rented Colab VM: SkinTokens, its venv and its checkpoints. |
+| `autorig_colab.py` | Rig a humanoid mesh, or play a preset on one, with SkinTokens on the VM. |
 | `pack_kimodo_clip.py` | Shrink a Kimodo motion clip to what `kimodo_retarget.py` reads, about 12x smaller. |
 | `clean_skin_weights.py` | Drop skin weights that come from bones far away in the skeleton, then rebalance. |
 | `kimodo_retarget.py` | Play a Kimodo text-to-motion clip on a SkinTokens-rigged humanoid and export an animated GLB. |

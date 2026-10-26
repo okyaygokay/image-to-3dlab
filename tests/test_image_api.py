@@ -443,3 +443,34 @@ def test_a_back_job_only_reads_pictures_inside_the_output_folder(tmp_path):
     for bad in ("../secrets.png", "/etc/passwd", "images/nope.png", f"images/{front.parent.name}"):
         with pytest.raises(ValueError):
             api.back_source(tmp_path, bad)
+
+
+# --- the Colab fallback: a machine with no local picture engine -------------------------------
+
+
+def test_picture_route_prefers_the_local_binary_then_the_rented_gpu(tmp_path):
+    """With sd-cli installed, pictures are drawn here, whatever Colab says. Without it,
+    a signed-in CLI means the rented GPU; without either, nobody can draw (a 503)."""
+    binary = tmp_path / "sd-cli"
+    assert api.picture_route(binary, colab=True) == "colab"
+    assert api.picture_route(binary, colab=False) == "none"
+    binary.write_text("#!/bin/sh\n")
+    assert api.picture_route(binary, colab=True) == "local"
+    assert api.picture_route(binary, colab=False) == "local"
+
+
+def test_a_remote_job_rides_the_supervisor_with_the_request_as_its_input(tmp_path):
+    """A text-to-picture run has no input picture, so the request (prompt + settings)
+    travels as the small JSON the supervisor uploads in its 'image' slot."""
+    job = api.ImageJob(id="x", directory=tmp_path, output_path=tmp_path / "out.png",
+                       prompt="a knight, plate armour", settings={"steps": 8, "seed": 3},
+                       remote=True)
+    command = api.remote_command(job)
+    request = json.loads((tmp_path / "colab_request.json").read_text())
+    assert request == {"prompt": "a knight, plate armour",
+                       "settings": job.settings}
+    assert str(command[2]).endswith("colab_generate.py")
+    assert command[3] == str(tmp_path / "colab_request.json")
+    assert command[4] == str(tmp_path / "out.png")
+    assert command[command.index("--backend") + 1] == "qwen_image"
+    assert "--yes" in command

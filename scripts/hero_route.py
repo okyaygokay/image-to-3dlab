@@ -45,6 +45,7 @@ PYTHON = Path(sys.executable)
 GENERATE = REPO / "scripts" / "pixal3d_generate.py"
 FINISH = REPO / "scripts" / "retopo_repaint.py"
 UPSCALE = REPO / "scripts" / "upscale_esrgan.py"
+COLAB = REPO / "scripts" / "colab_generate.py"
 BLENDER = REPO / "scripts" / "hero_blender.py"
 COMPRESS = REPO / "scripts" / "compress_glb_textures.py"
 BODY_FACES = 32000
@@ -143,22 +144,30 @@ def missing_parts(parts: dict[str, Path]) -> list[str]:
     return [name for name, path in parts.items() if not Path(path).exists()]
 
 
-def needed_parts() -> dict[str, Path]:
-    """Everything the route runs, by what to install to get it."""
+def needed_parts(colab: bool = False) -> dict[str, Path]:
+    """Everything the route runs, by what to install to get it.
+
+    In the colab mode the model parts (trellis-cli, the upscaler, post-replay) live on the
+    rented VM, so requiring them here would refuse a route that is about to work; the local
+    parts that remain -- the throwaway rigger and Blender -- are checked as usual.
+    """
     import autorig_api
-    import pixal3d_generate
     import retopo_repaint
 
-    from image_to_3dlab import pixal3d_native, upscale
-
-    return {
-        "Pixal3D (3D models)": pixal3d_generate.CLI,
+    parts = {
         "Auto-rig (finds the head)": autorig_api.venv_python(),
-        "Hero face upscaler (Real-ESRGAN, 67 MB)": upscale.WEIGHTS_FILE,
         "Blender (Finish)": retopo_repaint.find_blender() or Path("/missing/blender"),
-        # Upstream's old NVIDIA download lacks it; Setup's Rebuild for Pixal3D adds it.
-        "Pixal3D's own clean-up (Setup: Rebuild Pixal3D)": pixal3d_native.POST_REPLAY,
     }
+    if not colab:
+        import pixal3d_generate
+
+        from image_to_3dlab import pixal3d_native, upscale
+
+        parts["Pixal3D (3D models)"] = pixal3d_generate.CLI
+        parts["Hero face upscaler (Real-ESRGAN, 67 MB)"] = upscale.WEIGHTS_FILE
+        # Upstream's old NVIDIA download lacks it; Setup's Rebuild for Pixal3D adds it.
+        parts["Pixal3D's own clean-up (Setup: Rebuild Pixal3D)"] = pixal3d_native.POST_REPLAY
+    return parts
 
 
 NO_DUMP = ("this 3D model kept no clean-up data, so its body would stay at full size. Make the 3D "
@@ -183,6 +192,42 @@ def body_problem(body: Path | None, views: Path | None, dump: Path | None) -> st
     return None
 
 
+def pixal_command(colab: bool, image: Path, output: Path, *flags: str) -> list[str]:
+    """A Pixal3D generation: this machine's trellis-cli, or the rented GPU.
+
+    The colab form keeps its session (`--keep`): the head build, the upscale and the head
+    clean-up all want the same VM within minutes of each other, and each one alone would
+    otherwise stop the machine and orphan 8.4 GB of weights in /content. The idle reaper
+    stops the session when the run is over.
+    """
+    if not colab:
+        return [PYTHON, "-u", GENERATE, image, output, *flags]
+    return [PYTHON, "-u", COLAB, image, output, "--backend", "pixal3d",
+            "--keep", "--yes", "--", *flags]
+
+
+def upscale_command(colab: bool, crop: Path, upscaled: Path, size: int = 1024) -> list[str]:
+    """The head-crop upscale: local PyTorch, or the same script on the VM (--exec)."""
+    if not colab:
+        return [PYTHON, UPSCALE, crop, upscaled, "--size", str(size)]
+    return [PYTHON, "-u", COLAB, "--backend", "pixal3d", "--exec", "scripts/upscale_esrgan.py",
+            "--exec-input", crop, "--exec-output", upscaled, "--keep", "--yes",
+            "--", "{in}", "{out}", "--size", str(size)]
+
+
+def replay_command(colab: bool, dump: Path, output: Path, faces: int, atlas: int = 2048) -> list[str]:
+    """The head clean-up: local post-replay, or the prebuilt binary on the VM (--exec-bin)."""
+    from image_to_3dlab import pixal3d_native
+
+    if not colab:
+        return pixal3d_native.replay_command(dump, output, faces, atlas)
+    return [PYTHON, "-u", COLAB, "--backend", "pixal3d", "--exec-bin",
+            "vendor/pixal3d-cpp/build/post-replay", "--exec-input", dump,
+            "--exec-output", output, "--keep", "--yes",
+            "--", "{in}", "{out}", "--no-remesh", "--faces", str(int(faces)),
+            "--atlas", str(int(atlas))]
+
+
 def finish(run: Run, model: Path, picture: Path, views: Path, out: Path, faces: int, dump: Path | None) -> None:
     command = [PYTHON, "-u", FINISH, model, picture, out, "--steps-dir", out.with_suffix(".steps"),
                "--views", views, "--faces", str(faces), *FINISH_FLAGS]
@@ -195,14 +240,14 @@ def finish(run: Run, model: Path, picture: Path, views: Path, out: Path, faces: 
                  "objected; see run.log): hair and thin parts can shatter")
 
 
-def head_cleanup(run: Run, raw: Path, out: Path, faces: int) -> None:
+def head_cleanup(run: Run, raw: Path, out: Path, faces: int, colab: bool = False) -> None:
     """Pixal3D's own clean-up at FACES. Its mirror check is a coin-flip on a front-facing,
     near-symmetric head (0.2% vs 0.3% on the elf) and would drop to the classic route, which
     shatters hair; a head crop is always front-facing, so convert directly and say so."""
     from image_to_3dlab import pixal3d_native as native
 
     replay = out.with_name(out.stem + ".replay.glb")
-    run.run(native.replay_command(raw.with_suffix(native.DUMP_SUFFIX), replay, faces, 2048))
+    run.run(replay_command(colab, raw.with_suffix(native.DUMP_SUFFIX), replay, faces, 2048))
     out.write_bytes(native.convert_replay_glb(replay.read_bytes()))
 
 
@@ -225,16 +270,20 @@ def main() -> int:
     parser.add_argument("--body-dump", type=Path, default=None, help="that model's clean-up dump (.post.bin)")
     parser.add_argument("--body-record", type=Path, default=None, help="that model's run record, for provenance")
     parser.add_argument("--result", type=Path, default=None, help="also copy the finished GLB here")
+    parser.add_argument("--pixal", choices=("local", "colab"), default="local",
+                        help="where the Pixal3D calls run: this machine's trellis-cli, or a "
+                             "rented Colab GPU through scripts/colab_generate.py. The studio "
+                             "passes colab for a model made by the colab-pixal3d engine.")
     args = parser.parse_args()
 
-    missing = missing_parts(needed_parts())
+    missing = missing_parts(needed_parts(colab=args.pixal == "colab"))
     if missing:
         print("[hero] cannot start, not installed: " + "; ".join(missing)
               + ". Install them from the Setup page (nothing was downloaded).", file=sys.stderr)
         return 2
     import pixal3d_generate
 
-    if not pixal3d_generate.dump_supported():
+    if args.pixal == "local" and not pixal3d_generate.dump_supported():
         print(f"[hero] {NO_DUMP_BUILD}", file=sys.stderr)
         return 2
     problem = body_problem(args.body, args.body_views, args.body_dump)
@@ -252,7 +301,9 @@ def main() -> int:
 
     out = (args.out or REPO / "output" / "hero" / args.picture.stem[:60]).resolve()
     run = Run(out)
-    run.say(f"hero route: {args.picture} -> {out}")
+    colab = args.pixal == "colab"
+    run.say(f"hero route: {args.picture} -> {out}"
+            + (" (Pixal3D calls on a rented Colab GPU)" if colab else ""))
     picture = out / "picture.png"
     if not picture.exists():
         shutil.copy(args.picture, picture)
@@ -280,8 +331,8 @@ def main() -> int:
         shutil.copy(args.body, body_raw)
         run.say(f"body: using {args.body}")
     if run.step("body: Pixal3D", body_raw):
-        run.run([PYTHON, "-u", GENERATE, picture, body_raw, "--seed", str(args.seed),
-                 *(["--back", back] if back else [])])
+        run.run(pixal_command(colab, picture, body_raw, "--seed", str(args.seed),
+                              *(["--back", str(back)] if back else [])))
     body = out / "body.glb"
     if run.step(f"body: Finish {args.body_faces} + Pixel Match", body):
         dump = body_raw.with_suffix(".post.bin")
@@ -316,7 +367,7 @@ def main() -> int:
     crop_raw, crop_up = out / "head_crop_raw.png", out / "head_crop.png"
     if run.step("crop + Real-ESRGAN", crop_up):
         Image.open(picture).convert("RGB").crop(crop).save(crop_raw)
-        run.run([PYTHON, UPSCALE, crop_raw, crop_up, "--size", "1024"])
+        run.run(upscale_command(colab, crop_raw, crop_up))
     crop_cutout = out / "head_crop_cutout.png"
     if run.step("crop cut-out", crop_cutout):
         matte.cut_out(Image.open(crop_up).convert("RGB"))[0].save(crop_cutout)
@@ -326,10 +377,10 @@ def main() -> int:
     stage(run, "head", "Building the head on its own (the long step)")
     head_raw = out / "head_raw.glb"
     if run.step("head: Pixal3D on the crop", head_raw):
-        run.run([PYTHON, "-u", GENERATE, head_picture, head_raw, "--seed", str(args.seed)])
+        run.run(pixal_command(colab, head_picture, head_raw, "--seed", str(args.seed)))
     head_clean = out / "head_clean.glb"
     if run.step(f"head: clean-up {args.head_faces}", head_clean):
-        head_cleanup(run, head_raw, head_clean, args.head_faces)
+        head_cleanup(run, head_raw, head_clean, args.head_faces, colab)
         run.flag("head clean-up skips Finish's mirror check (front-facing crop); glance at the check sheet")
     head = out / "head.glb"
     if run.step("head: Pixel Match", head):

@@ -4,17 +4,20 @@
 Pixal3D is not a Python model. It is `trellis-cli` (C++/GGML) plus 8.4 GB of Q8_0 weights,
 driven by `scripts/pixal3d_generate.py`. On a Mac the wrapper borrows the viewer's own
 interpreter and the bootstrap compiles Metal kernels; on a rented Colab VM neither of those
-is true, so this does the two halves that machine actually needs:
+is true, so this does the three halves that machine actually needs:
 
 1. **A venv of its own**, because the wrapper imports Pillow, numpy, rembg, onnxruntime and
-   trimesh, and the VM's system Python has none of them. The repo's lock is installed with
-   PyTorch and the NVIDIA wheels stripped: Pixal3D never touches torch (its runtime is
-   GGML), and pulling 6 GB of CUDA wheels for a backend that cannot use them would double
-   the install for nothing.
+   trimesh, and the VM's system Python has none of them. The repo's whole lock goes in,
+   PyTorch and the NVIDIA wheels included: Pixal3D itself never touches torch (its runtime
+   is GGML), but the Hero face route upscales its head crop on the same VM, and that
+   (`image_to_3dlab/upscale.py`) does. A few GB per session is the price of a Mac with no
+   local models at all.
 2. **The prebuilt `trellis-cli` and the weights**, delegated to `bootstrap_pixal3d.py`.
    That script already knows the machine-dependent part -- our CUDA 12 prebuilt when the
    driver is new enough, a compile when it is not -- and keeping the choice in one place is
    what stops the two routes drifting.
+3. **Real-ESRGAN x4plus (67 MB)** through `bootstrap_upscaler.py`, the one file the
+   upscaler loads, fetched from the project's own release and verified by reading it back.
 
 The weights are fetched from their pinned Hugging Face revisions by `bootstrap_pixal3d.py`,
 so a VM gets exactly the files that were tested rather than whatever was pushed since.
@@ -45,6 +48,7 @@ VENV = VENDOR / ".venv"
 # Written last, so an install that died halfway never looks finished.
 BUILT_MARKER = VENDOR / ".i2l-build-complete"
 BOOTSTRAP = REPO / "scripts" / "bootstrap_pixal3d.py"
+UPSCALER = REPO / "scripts" / "bootstrap_upscaler.py"
 LOCK = REPO / "requirements.lock"
 PYTHON_VERSION = "3.11"
 WEIGHTS_GB = 8.4
@@ -71,10 +75,12 @@ def announcement() -> str:
         "  backend: Pixal3D (C++/GGML), single-view",
         "  route:   this rented Colab VM, into vendor/pixal3d-cpp/",
         f"  size:    about {WEIGHTS_GB:.1f} GB of weights, plus the Python packages",
+        "           (PyTorch and its CUDA wheels included, for Hero's head-crop upscale)",
         "  source:  raven38/pixal3d-sv-q8_0-v1 on Hugging Face, plus the pinned",
-        "           trellis-cli CUDA 12 prebuilt from this repo's own release",
+        "           trellis-cli CUDA 12 prebuilt from this repo's own release, plus",
+        "           Real-ESRGAN x4plus (67 MB) from the Real-ESRGAN release",
         "  licence: MIT for the code and flow weights; the bundled image encoder is",
-        "           under the DINOv3 License",
+        "           under the DINOv3 License; Real-ESRGAN is BSD-3-Clause",
         "",
     ])
 
@@ -90,7 +96,13 @@ def must(command: list[str] | str, *, what: str, timeout: float) -> None:
 
 
 def install_python_packages() -> None:
-    """The venv the wrapper runs in: the lock, minus PyTorch and the CUDA wheels."""
+    """The venv the wrapper (and Hero's upscaler) runs in: the lock, whole.
+
+    PyTorch stays in on purpose: nothing in a Pixal3D generation touches it, but the Hero
+    face route upscales its head crop on this same VM, through `image_to_3dlab/upscale.py`.
+    Stripping it saved a few GB per session and made Hero impossible; the whole lock is
+    what the studio's own environment runs, so it is also the best-tested set.
+    """
     ensure_uv()
     if not venv_python().is_file():
         # --clear: a previous attempt can leave the directory without a usable interpreter
@@ -102,13 +114,14 @@ def install_python_packages() -> None:
     if not python.is_file():
         raise SystemExit(f"the venv at {VENV} has no interpreter at {python}")
 
-    # `without-cuda` is the same transform the AMD install uses: keep every pin, drop the
-    # ones that only exist to carry PyTorch's CUDA runtime.
-    lock = LOCK.read_text() if LOCK.is_file() else (REPO / "requirements.txt").read_text()
-    stripped = VENV / "requirements.colab.lock"
-    stripped.write_text(host.without_cuda(lock))
-    must(["uv", "pip", "install", "--python", str(python), "-r", str(stripped)],
-         what="installing the wrapper's Python packages", timeout=3600)
+    must(["uv", "pip", "install", "--python", str(python), "-r", str(LOCK)],
+         what="installing the Python packages", timeout=5400)
+
+
+def install_upscaler() -> None:
+    """Real-ESRGAN x4plus, the one file Hero's crop upscale loads."""
+    must([str(venv_python()), str(UPSCALER), "--yes"],
+         what="installing the Real-ESRGAN upscaler", timeout=1800)
 
 
 def install_trellis_and_weights() -> None:
@@ -136,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     VENDOR.mkdir(parents=True, exist_ok=True)
     install_python_packages()
     install_trellis_and_weights()
+    install_upscaler()
     BUILT_MARKER.write_text("ok")
 
     print("\nDone. Generate with:\n"

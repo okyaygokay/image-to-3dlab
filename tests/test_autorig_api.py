@@ -178,3 +178,42 @@ def test_the_shipped_preset_moves_are_all_in_the_repo():
     shipped = aa.presets()
     assert len(shipped) >= 42, len(shipped)  # 21 moves, takes A and B
     assert {"idle", "walk", "run", "dance"} <= {p["id"] for p in shipped}
+
+
+# --- the Colab fallback: a machine with no local rigger ---------------------------------------
+
+
+def test_a_machine_with_no_local_rigger_rigs_on_a_rented_gpu(tmp_path, monkeypatch):
+    """SkinTokens is a local install; when it is missing and the Colab CLI is signed in,
+    the same job shape runs one supervisor command instead of the venv's two."""
+    monkeypatch.setattr(aa, "installed", lambda root=None: False)
+    monkeypatch.setattr(aa, "colab_ready", lambda: True)
+    manager = aa.AnimateJobManager(tmp_path / "animate", tmp_path)
+    job = manager.create_rig("knight.glb", b"glTF", None, "uploaded")
+    assert len(job.commands) == 1
+    command, _cwd = job.commands[0]
+    assert str(command[2]).endswith("colab_generate.py")
+    assert command[command.index("--backend") + 1] == "autorig"
+    assert command[4] == str(job.result)
+
+
+def test_a_local_rigger_still_runs_locally_even_when_colab_is_signed_in(tmp_path, monkeypatch):
+    monkeypatch.setattr(aa, "installed", lambda root=None: True)
+    manager = aa.AnimateJobManager(tmp_path / "animate", tmp_path)
+    job = manager.create_rig("knight.glb", b"glTF", None, "uploaded")
+    assert len(job.commands) == 2
+    assert "demo.py" in job.commands[0][0]
+
+
+def test_an_animation_falls_back_to_the_same_rented_gpu(tmp_path, motions, monkeypatch):
+    run = tmp_path / "animate" / "knight__rig__20261005-120000"
+    rigged = _glb(run / "knight_rigged.glb")
+    (rigged.with_suffix(".provenance.json")).write_text(json.dumps(
+        {"rig": {"model": "knight.glb", "license": {"name": "MIT"}}}))
+    monkeypatch.setattr(aa, "installed", lambda root=None: False)
+    monkeypatch.setattr(aa, "colab_ready", lambda: True)
+    manager = aa.AnimateJobManager(tmp_path / "animate", motions)
+    job = manager.create_animation(rigged, "walk", 0)
+    command, _ = job.commands[0]
+    forwarded = command[command.index("--") + 1:]
+    assert forwarded[:2] == ["--preset", "walk"]

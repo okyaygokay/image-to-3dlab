@@ -27,6 +27,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[1]
 
 for directory in ("viewer", "scripts"):
@@ -36,3 +38,21 @@ for directory in ("viewer", "scripts"):
 
 # The suite never counts or sends usage from a real install (tests of it pass their own env).
 os.environ["I3D_NO_USAGE"] = "1"
+
+
+@pytest.fixture(autouse=True)
+def _colab_off_by_default(monkeypatch):
+    """No test may depend on this machine's Colab sign-in.
+
+    `colab_ready()` shells out to the CLI, and on a signed-in dev machine it answers True:
+    a test like "a rig runs the local commands" flips to the rented-GPU branch for no
+    reason visible in the diff. Off by default; a test that wants the hosted routes opts
+    in by patching `backend_catalog._probe_colab` and forgetting the cache, exactly the
+    way tests/test_backend_catalog.py already does.
+    """
+    import backend_catalog
+
+    monkeypatch.setattr(backend_catalog, "_probe_colab", lambda *_a, **_k: False)
+    backend_catalog.forget_colab_readiness()
+    yield
+    backend_catalog.forget_colab_readiness()

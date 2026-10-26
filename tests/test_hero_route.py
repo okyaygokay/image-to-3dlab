@@ -6,6 +6,7 @@ decide whether a 25-minute run starts at all and whether the studio can follow i
 from __future__ import annotations
 
 import io
+import sys
 
 from scripts import hero_route
 
@@ -132,9 +133,71 @@ def test_hero_stops_before_any_work_on_a_build_that_cannot_save_its_clean_up(mon
 
     import pixal3d_generate
 
-    monkeypatch.setattr(hero_route, "needed_parts", dict)
+    monkeypatch.setattr(hero_route, "needed_parts", lambda **_kwargs: {})
     monkeypatch.setattr(pixal3d_generate, "dump_supported", lambda cli=None: False)
     monkeypatch.setattr(sys, "argv", ["hero_route.py", str(tmp_path / "x.png"), "--out", str(tmp_path / "run")])
     assert hero_route.main() == 2
     assert "Rebuild for Pixal3D" in capsys.readouterr().err
     assert not (tmp_path / "run").exists()                # nothing started
+
+
+# --- the Colab mode: the model calls ride a rented GPU ---------------------------------------
+
+
+def test_the_colab_mode_builds_supervisor_commands_instead_of_local_ones():
+    """Head build, crop upscale and head clean-up are the three model calls; in the colab
+    mode each becomes a supervisor invocation, and each keeps the session warm because the
+    next call wants the same VM's weights."""
+    from pathlib import Path
+
+    head = hero_route.pixal_command(True, Path("crop.png"), Path("head.glb"), "--seed", "42")
+    assert str(head[2]).endswith("colab_generate.py")
+    assert head[head.index("--backend") + 1] == "pixal3d"
+    assert "--keep" in head and "--yes" in head
+    assert head[head.index("--") + 1:] == ["--seed", "42"]
+
+    up = hero_route.upscale_command(True, Path("c.png"), Path("c_up.png"))
+    assert up[up.index("--exec") + 1] == "scripts/upscale_esrgan.py"
+    assert str(up[up.index("--exec-input") + 1]) == "c.png"
+    assert str(up[up.index("--exec-output") + 1]) == "c_up.png"
+    assert up[up.index("--") + 1:] == ["{in}", "{out}", "--size", "1024"]
+
+    replay = hero_route.replay_command(True, Path("d.post.bin"), Path("r.glb"), 16000)
+    assert replay[replay.index("--exec-bin") + 1] == "vendor/pixal3d-cpp/build/post-replay"
+    assert replay[replay.index("--") + 1:] == ["{in}", "{out}", "--no-remesh",
+                                               "--faces", "16000", "--atlas", "2048"]
+
+
+def test_the_local_mode_unchanged_by_the_colab_routing():
+    from pathlib import Path
+
+    head = hero_route.pixal_command(False, Path("p.png"), Path("h.glb"), "--seed", "7")
+    assert head == [hero_route.PYTHON, "-u", hero_route.GENERATE,
+                    Path("p.png"), Path("h.glb"), "--seed", "7"]
+    assert hero_route.COLAB not in head
+
+
+def test_needed_parts_in_colab_mode_drops_the_model_parts(monkeypatch, tmp_path):
+    """trellis-cli, the upscaler and post-replay live on the VM in that mode; a Mac with none
+    of them must still pass the gate, while the rigger and Blender stay required."""
+    import types
+
+    rig = types.ModuleType("autorig_api")
+    rig.venv_python = lambda root=None: tmp_path / "rig-python"
+    repaint = types.ModuleType("retopo_repaint")
+    repaint.find_blender = lambda: tmp_path / "blender"
+    # setitem, not a bare assignment: monkeypatch puts the real modules back afterwards,
+    # so later tests (and the suite's other copies) still see them.
+    monkeypatch.setitem(sys.modules, "autorig_api", rig)
+    monkeypatch.setitem(sys.modules, "retopo_repaint", repaint)
+    (tmp_path / "rig-python").write_text("")
+    (tmp_path / "blender").write_text("")
+
+    local = hero_route.needed_parts()
+    colab = hero_route.needed_parts(colab=True)
+    assert {name for name in local} - {name for name in colab} == {
+        "Pixal3D (3D models)",
+        "Hero face upscaler (Real-ESRGAN, 67 MB)",
+        "Pixal3D's own clean-up (Setup: Rebuild Pixal3D)",
+    }
+    assert hero_route.missing_parts(colab) == []

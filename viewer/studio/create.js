@@ -81,6 +81,9 @@ export function openCreate({ stage, recipes, engines, presets, frontBack = null,
     // A Colab engine runs somewhere that costs money and needs no install here. Both facts
     // belong on the sheet: "runs on your Mac" is the wrong expectation to leave someone with.
     const colab = Boolean(chosen?.remote);
+    // Hero face runs on either Pixal3D engine: its head build rides the rented GPU when the
+    // model came from there (finish_api passes --pixal colab by the run's record).
+    const heroable = pixal || state.engine === 'colab-pixal3d';
     // Pixal3D runs at one resolution; the 512³/1024³/1536³ ladder belongs to the Hi3D-style
     // routes. Showing it here would sell a choice the engine silently ignores.
     const colabDetail = colab && state.engine !== 'colab-pixal3d';
@@ -107,7 +110,7 @@ export function openCreate({ stage, recipes, engines, presets, frontBack = null,
       <div class="wants">${Object.entries(WANTS).map(([k, v]) => { const ok = ALLOWED[state.have][k]; return `<button type="button" class="kind${ok === true ? '' : ' off'}" data-want="${k}" aria-pressed="${k === state.want}" ${ok === true ? '' : `disabled data-tip="${esc(ok)}"`}><b>${v.label}</b><small>${v.hint}</small></button>`; }).join('')}</div>
       <div class="q"><span class="qn">3</span><b>Steps</b><span class="hint">click a step to stop there</span></div>
       <div class="path">${plan.map((s, i) => `${i ? '<span class="arr">→</span>' : ''}<button type="button" class="pstep${active.includes(s) ? '' : ' skip'}" data-stop="${s}">${STEP_LABELS[s]}</button>`).join('')}</div>
-      ${heroChoice(state, active, pixal)}
+      ${heroChoice(state, active, heroable)}
       ${active.includes('animated') ? `<label class="field">First move<select data-k="move">${presets.filter((p) => !p.take).map((p) => `<option value="${esc(p.id)}" ${p.id === state.firstMove ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}</select></label>` : ''}
       ${active.includes('picture') ? `<details class="adv"><summary>Advanced: picture settings</summary>
         <div class="picset">
@@ -190,7 +193,7 @@ export function openCreate({ stage, recipes, engines, presets, frontBack = null,
         // settings and a local route ignores them.
         colabSettings: active.includes('model') && engines.find((e) => e.id === state.engine)?.remote
           ? { ...state.colab } : null,
-        finishSettings: heroWanted(state, active, state.engine === 'pixal3d') ? { faces: 32000, hero: true } : null });
+        finishSettings: heroWanted(state, active, pixal || state.engine === 'colab-pixal3d') ? { faces: 32000, hero: true } : null });
     };
     text?.focus();
   }

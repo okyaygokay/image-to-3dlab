@@ -124,6 +124,10 @@ def test_a_slightly_short_download_still_counts_as_ready():
 
 
 def test_onboarding_is_needed_only_when_nothing_is_ready(monkeypatch, tmp_path):
+    # The hosted routes are "ready" only when an account answers; the suite fakes that
+    # off (conftest), so this test switches it on -- it is exactly about that state.
+    monkeypatch.setattr(bc, "_probe_colab", lambda *_a, **_k: True)
+    bc.forget_colab_readiness()
     status = bc.catalog_status()
     assert status["needs_onboarding"] is (status["ready_count"] == 0)
 
