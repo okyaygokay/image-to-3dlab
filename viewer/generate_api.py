@@ -265,6 +265,7 @@ SELF_CUTTING: dict[tuple[str, str | None], str] = {
     ("colab-hi3d", None): "scripts/hi3d_generate.py",
     ("colab-hunyuan", None): "scripts/hunyuan_cuda_generate.py",
     ("colab-trellis", None): "scripts/trellis_cuda_generate.py",
+    ("colab-pixal3d", None): "scripts/pixal3d_generate.py",
 }
 
 # Xiong's paint+shape code is MIT and tracked in-repo at hunyuan_mlx/ (moved out of
@@ -2593,45 +2594,119 @@ def _colab_build_args(remote_backend: str):
     return build
 
 
-def _colab_parse_line(job: Job, line: str) -> None:
-    """Map the supervisor's lines onto the panel's stages.
+def _pixal3d_colab_build_args():
+    """Pixal3D's wrapper flags, after the supervisor's own.
 
-    The supervisor passes the remote wrapper's own STAGE lines through, and wraps them with
-    its own for the parts only it knows about (renting, installing, downloading).
+    Its resolution and seed mean what they say, so they are passed straight through rather
+    than mapped onto Hi3D's refinement ladder. `--accelerator` still rides on the supervisor.
     """
-    stripped = line.strip()
-    if not stripped:
-        return
-    if stripped.startswith(("allocating", "session ", "uploaded", "remote job started",
-                            "wrote ", "stopping session", "syncing")):
-        phase = "export" if stripped.startswith(("wrote ", "stopping")) else "start"
-        if stripped.startswith("syncing") or "install" in stripped:
-            phase = "setup"
-        job.emit({"phase": phase, "message": stripped[:200]})
-        return
-    if stripped.startswith("installing"):
-        job.emit({"phase": "setup", "message": stripped[:200]})
-        return
-    # The remote wrapper's own stage lines, forwarded verbatim.
-    if stripped.startswith("STAGE "):
-        name = stripped.split(None, 1)[1].strip()
-        if name in job_stage_ids():
-            job.emit({"phase": name, "message": f"On the Colab GPU: {name}"})
-        return
-    step = HUNYUAN_STEP_RE.match(stripped)
-    if step:
-        current, total = int(step[1]), int(step[2])
-        job.emit({"phase": "refine", "step": current, "total": total,
-                  "stage_pct": round(current / total * 100) if total else 0,
-                  "message": f"Refining on the Colab GPU — step {current}/{total}"})
-        return
-    if stripped.startswith(("error", "Refusing")):
-        job.emit({"phase": "start", "message": stripped[:200]})
+    def build(job: Job) -> list[str]:
+        s = job.settings
+        return [
+            str(job.image_path), str(job.output_path),
+            "--backend", "pixal3d",
+            "--accelerator", str(s.get("accelerator", COLAB_SETTINGS["accelerator"])),
+            "--yes",
+            *(["--keep"] if s.get("keep") else []),
+            "--",
+            "--res", str(s["res"]),
+            "--seed", str(s["seed"]),
+            "--fov", str(s["fov"]),
+        ] + ([] if s.get("steps", "auto") == "auto" else ["--steps", str(s["steps"])])
+
+    return build
 
 
-def job_stage_ids() -> set[str]:
-    """Stages a remote wrapper may report, minus the ones the supervisor names itself."""
-    return set(COLAB_STAGES)
+def _colab_parse_line_for(remote_backend: str):
+    """The line parser for one hosted route.
+
+    The supervisor passes the remote wrapper's own progress lines through, and wraps them
+    with its own for the parts only it knows about (renting, installing, downloading). The
+    wrappers do not agree on a format: Hi3D and Hunyuan print `STAGE`/`STEP`, Pixal3D
+    prints `[n/6]` banners, so the route decides how its lines are read.
+    """
+    stages = job_stage_ids(remote_backend)
+
+    def parse(job: Job, line: str) -> None:
+        stripped = line.strip()
+        if not stripped:
+            return
+        if stripped.startswith(("allocating", "session ", "uploaded", "remote job started",
+                                "wrote ", "stopping session", "syncing")):
+            phase = "export" if stripped.startswith(("wrote ", "stopping")) else "start"
+            if stripped.startswith("syncing") or "install" in stripped:
+                phase = "setup"
+            job.emit({"phase": phase, "message": stripped[:200]})
+            return
+        if stripped.startswith("installing"):
+            job.emit({"phase": "setup", "message": stripped[:200]})
+            return
+        # A wrapper's own stage line, forwarded verbatim.
+        if stripped.startswith("STAGE "):
+            name = stripped.split(None, 1)[1].strip()
+            if name in stages:
+                job.emit({"phase": name, "message": f"On the Colab GPU: {name}"})
+            return
+        # Pixal3D's `[3/6] ...` banner, which is its own stage announcement.
+        if stripped.startswith("[") and "]" in stripped:
+            marker = stripped[1:stripped.index("]")]
+            if "/6" in marker:
+                try:
+                    index = int(marker.split("/")[0])
+                except ValueError:
+                    return
+                stage = PIXAL3D_BANNERS.get(index)
+                if stage is not None and stage in stages:
+                    job.emit({
+                        "phase": stage,
+                        "stage_pct": 0,
+                        "overall_pct": min(99, round(index / 6 * 100)),
+                        "message": f"On the Colab GPU: {PIXAL3D_STAGE_LABELS[stage]}",
+                    })
+                return
+        step = HUNYUAN_STEP_RE.match(stripped)
+        if step:
+            current, total = int(step[1]), int(step[2])
+            job.emit({"phase": "refine", "step": current, "total": total,
+                      "stage_pct": round(current / total * 100) if total else 0,
+                      "message": f"Refining on the Colab GPU — step {current}/{total}"})
+            return
+        if stripped.startswith(("error", "Refusing")):
+            job.emit({"phase": "start", "message": stripped[:200]})
+
+    return parse
+
+
+def _colab_parse_line(job: Job, line: str) -> None:
+    """Hi3D's reader, kept as a name because that is what the registry used to hold."""
+    _colab_parse_line_for("hi3d")(job, line)
+
+
+#: Pixal3D reports `[n/6]` banners of its own, not the coarse/refine pair Hi3D uses, so a
+#: Colab run of it has different rows to fill. Same shape as the local route's stages, so a
+#: user who has watched one on a Mac sees the same names on a rented GPU.
+PIXAL3D_COLAB_STAGES = ["start", "setup", *PIXAL3D_STAGES, "export"]
+PIXAL3D_COLAB_STAGE_LABELS = {
+    "start": "Renting a GPU",
+    "setup": "Installing on the VM (first run only)",
+    **PIXAL3D_STAGE_LABELS,
+    "export": "Bringing the GLB back",
+}
+
+#: What each hosted route calls its work. Kept as data so a new route is one entry.
+COLAB_ROUTE_STAGES: dict[str, tuple[list[str], dict[str, str]]] = {
+    "hi3d": (COLAB_STAGES, COLAB_STAGE_LABELS),
+    "hunyuan_cuda": (COLAB_STAGES, COLAB_STAGE_LABELS),
+    "trellis_cuda": (COLAB_STAGES, COLAB_STAGE_LABELS),
+    "pixal3d": (PIXAL3D_COLAB_STAGES, PIXAL3D_COLAB_STAGE_LABELS),
+}
+
+
+def job_stage_ids(remote_backend: str = "hi3d") -> set[str]:
+    """The stage ids valid as a `phase` for this hosted route: what the wrapper may report
+    plus the ones the supervisor names itself (renting, installing, downloading)."""
+    stages, _ = COLAB_ROUTE_STAGES.get(remote_backend, (COLAB_STAGES, COLAB_STAGE_LABELS))
+    return set(stages)
 
 
 def _colab_readiness() -> dict[str, Any]:
@@ -2661,19 +2736,33 @@ def colab_spec(remote_backend: str) -> BackendSpec:
         "hi3d": "Hi3D 1.0 (Colab GPU)",
         "hunyuan_cuda": "Hunyuan3D-2.1 (Colab GPU)",
         "trellis_cuda": "TRELLIS.2 (Colab GPU)",
+        "pixal3d": "Pixal3D (Colab GPU)",
     }
+    stages, stage_labels = COLAB_ROUTE_STAGES.get(remote_backend,
+                                                  (COLAB_STAGES, COLAB_STAGE_LABELS))
+    # Each hosted route has its own settings, because they are the remote wrapper's own
+    # flags. Pixal3D takes a resolution and a seed rather than a refinement ladder, so
+    # handing it the Hi3D defaults would fail inside the wrapper on the VM.
+    if remote_backend == "pixal3d":
+        defaults = PIXAL3D_DEFAULT_SETTINGS
+        validate = _pixal3d_validate_settings
+        build_args = _pixal3d_colab_build_args()
+    else:
+        defaults = COLAB_SETTINGS
+        validate = _colab_validate_settings
+        build_args = _colab_build_args(remote_backend)
     return BackendSpec(
         id=f"colab-{remote_backend.split('_')[0]}",
         label=labels.get(remote_backend, f"{remote_backend} (Colab GPU)"),
         interpreter=Path(sys.executable),
         wrapper=REPO / "scripts" / "colab_generate.py",
-        default_settings=COLAB_SETTINGS, stages=COLAB_STAGES,
-        stage_labels=COLAB_STAGE_LABELS,
+        default_settings=defaults, stages=stages,
+        stage_labels=stage_labels,
         # The remote wrapper mattes the picture itself.
         requires_alpha=False,
-        validate_settings=_colab_validate_settings,
-        build_args=_colab_build_args(remote_backend),
-        parse_line=_colab_parse_line, readiness=_colab_readiness,
+        validate_settings=validate,
+        build_args=build_args,
+        parse_line=_colab_parse_line_for(remote_backend), readiness=_colab_readiness,
         # All the memory is on the VM; this machine needs none of it.
         gpu_memory_wanted=None,
     )
@@ -2717,6 +2806,7 @@ BACKENDS.update({
     "colab-hi3d": colab_spec("hi3d"),
     "colab-hunyuan": colab_spec("hunyuan_cuda"),
     "colab-trellis": colab_spec("trellis_cuda"),
+    "colab-pixal3d": colab_spec("pixal3d"),
     "hunyuan-mlx": BackendSpec(
         id="hunyuan-mlx", label="Hunyuan3D-MLX (dgrauet shape + Xiong paint)",
         interpreter=HUNYUAN_PYTHON, wrapper=HUNYUAN_WRAPPER,

@@ -38,7 +38,7 @@ that the session is warm; a second job is just the generation.
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--backend` | `hi3d` | `hi3d`, `hunyuan_cuda` or `trellis_cuda` |
+| `--backend` | `hi3d` | `hi3d`, `hunyuan_cuda`, `trellis_cuda` or `pixal3d` |
 | `--accelerator` | `G4` | `G4`, `A100`, `L4`, `T4`, `H100` |
 | `--session` | a warm one, else new | Use this VM by name (implies `--keep`) |
 | `--new-session` | off | Rent a fresh VM and pay the install again |
@@ -61,7 +61,11 @@ Anything after `--` is forwarded to the remote wrapper untouched:
 
 ```bash
 python scripts/colab_generate.py photo.png out.glb --backend hi3d -- --resolution 1536
+python scripts/colab_generate.py photo.png out.glb --backend pixal3d -- --seed 7
 ```
+
+Pixal3D runs at its one resolution (1024), so it has no detail flag; its first job on a
+fresh VM downloads 8.4 GB of weights (about ten minutes) instead of compiling anything.
 
 ### Which accelerator
 

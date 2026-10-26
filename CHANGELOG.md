@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Finish's retopology accepts a model with no texture.** Hi3D emits geometry plus a flat
+  colour (`baseColorFactor`) and leaves painting to a later stage, so running Finish on its
+  output died with "could not find the base colour texture to transfer", which reads as a
+  corrupt file. The bake now transfers the flat colour as a solid when there is no map —
+  verified on the real file: 18,920 faces, UVs, baked texture.
 - **`./lab` says what is wrong when the repo was cloned instead of installed.** Cloning with
   git or `gh` skips `install.sh`, which is what builds `.venv`, so the first run died with
   `cannot execute: No such file or directory` — a raw path error from the one script whose
@@ -40,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     costs compute units on someone else's hardware.
   - `scripts/colab_supervisor.py` waits for the detached job, so a crash is reported as a
     crash rather than looking like a hang forever.
+  - Pixal3D's hosted route keeps its own settings (resolution, seed, camera FOV) and its
+    own `[n/6]` progress rows, and installs through
+    `scripts/bootstrap_pixal3d_colab.py`: a venv for the wrapper plus the prebuilt
+    `trellis-cli` and 8.4 GB of Q8_0 weights on the VM.
 
 ## [0.5.2] - 2026-10-25
 

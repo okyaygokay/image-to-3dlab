@@ -420,7 +420,7 @@ def test_backend_registry_lists_every_backend():
         "trellis", "sf3d", "hunyuan-mlx", "hunyuan-mlx-xiong", "pixal3d", "hunyuan-cuda",
         "hunyuan-rocm", "hi3d",
         # Colab-hosted: the same models on a rented GPU.
-        "colab-hi3d", "colab-hunyuan", "colab-trellis",
+        "colab-hi3d", "colab-hunyuan", "colab-trellis", "colab-pixal3d",
     }
     for spec in api.BACKENDS.values():
         assert spec.stages, f"{spec.id} must declare at least one stage"
@@ -2075,7 +2075,7 @@ def test_a_colab_engine_is_offered_where_no_nvidia_card_exists():
     offered = [b for b in backend_catalog.catalog_status(host=backend_catalog.APPLE)["backends"]
                if b["kind"] == "3d" and b["state"] == "ready"]
     ids = {b["id"] for b in offered}
-    for wanted in ("colab-hi3d", "colab-hunyuan", "colab-trellis"):
+    for wanted in ("colab-hi3d", "colab-hunyuan", "colab-trellis", "colab-pixal3d"):
         assert wanted in ids, f"{wanted} is not offered on a Mac"
         assert wanted in api.BACKENDS, f"{wanted} has no BackendSpec"
         assert offered[[b["id"] for b in offered].index(wanted)]["remote"] is True
@@ -2111,3 +2111,64 @@ def test_colab_settings_reject_a_bad_accelerator():
     # defaults survive a partial form, so an old tab still works
     out = validate({})
     assert out["accelerator"] and out["resolution"] in (512, 1024, 1536)
+
+
+def test_colab_pixal3d_forwards_its_own_settings_not_hi3ds(tmp_path):
+    """Pixal3D's wrapper takes a resolution and a seed, not Hi3D's refinement ladder.
+
+    Handing it the Hi3D defaults would die inside the wrapper on the VM, two minutes into
+    a rented session, with an argparse error nobody local can see.
+    """
+    spec = api.BACKENDS["colab-pixal3d"]
+    assert spec.default_settings == api.PIXAL3D_DEFAULT_SETTINGS
+    settings = spec.validate_settings({"res": 1024, "seed": 7, "fov": 0.5})
+    job = api.Job("0" * 32, tmp_path, tmp_path / "in.png", tmp_path / "out.glb",
+                  settings, "colab-pixal3d")
+    args = spec.build_args(job)
+    assert args[args.index("--backend") + 1] == "pixal3d"
+    assert "--accelerator" in args and "--yes" in args
+    # The wrapper's own flags come after `--`, exactly as the supervisor splits them.
+    wrapper = args[args.index("--") + 1:]
+    assert wrapper[wrapper.index("--res") + 1] == "1024"
+    assert wrapper[wrapper.index("--seed") + 1] == "7"
+    assert wrapper[wrapper.index("--fov") + 1] == "0.5"
+    # Hi3D's flags must not leak into a route that would choke on them.
+    assert "--resolution" not in wrapper, wrapper
+
+
+def test_colab_pixal3d_validates_through_the_local_route_s_checker():
+    """Same engine, same rules: there is no res-512 flow whether it runs here or rented."""
+    validate = api.BACKENDS["colab-pixal3d"].validate_settings
+    with pytest.raises(ValueError, match="res"):
+        validate({"res": 512})
+    assert validate({})["res"] == 1024
+
+
+def test_colab_pixal3d_reports_its_banners_as_stages(tmp_path):
+    """Pixal3D prints `[n/6]` banners, not Hi3D's `STAGE` lines, so the hosted route's
+    parser must map them onto its own rows -- and the supervisor's download lines must
+    still land on rows it declares."""
+    spec = api.BACKENDS["colab-pixal3d"]
+    assert "views" in spec.stages and "export" in spec.stages
+    job = api.Job("0" * 32, tmp_path, tmp_path / "in.png", tmp_path / "out.glb",
+                  spec.validate_settings({}), "colab-pixal3d")
+    for line in (
+        "allocating a G4 VM...",
+        "[1/6] Pixal3D multiview: load views",
+        "[3/6] shape SLAT flow (LR 512 -> HR 1024 cascade)",
+        "[6/6] write out.glb",
+        "wrote /tmp/out.glb",
+    ):
+        spec.parse_line(job, line)
+    phases = [event["phase"] for event in job.events]
+    assert phases == ["start", "views", "shape", "write", "export"]
+    unknown = sorted(set(phases) - set(spec.stages))
+    assert not unknown, f"phases that are not declared stages: {unknown}"
+
+
+def test_colab_pixal3d_stages_do_not_leak_into_the_hi3d_route():
+    """Each hosted route reads its own lines. A `[3/6]` banner on the Hi3D parser is
+    nothing it knows about, and inventing a row for it would break the panel's lookup."""
+    hi3d = api.BACKENDS["colab-hi3d"]
+    assert api.job_stage_ids("pixal3d") == set(api.PIXAL3D_COLAB_STAGES)
+    assert "views" not in hi3d.stages

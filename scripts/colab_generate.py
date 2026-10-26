@@ -62,6 +62,13 @@ BACKENDS: dict[str, dict[str, str]] = {
         "wrapper": "scripts/trellis_cuda_generate.py",
         "label": "TRELLIS.2 (NVIDIA)",
     },
+    # Pixal3D is a C++/GGML binary driven by a Python wrapper, not a torch model, so its
+    # setup is a venv for the wrapper plus the prebuilt trellis-cli and its weights.
+    "pixal3d": {
+        "setup": "scripts/bootstrap_pixal3d_colab.py",
+        "wrapper": "scripts/pixal3d_generate.py",
+        "label": "Pixal3D (C++/GGML)",
+    },
 }
 
 #: The venv each setup creates on the VM, relative to REMOTE_ROOT. A setup that installs
@@ -71,6 +78,7 @@ REMOTE_PYTHON = {
     "hi3d": f"{REMOTE_ROOT}/vendor/hi3d/.venv/bin/python",
     "hunyuan_cuda": f"{REMOTE_ROOT}/vendor/hunyuan-cuda/.venv/bin/python",
     "trellis_cuda": f"{REMOTE_ROOT}/vendor/trellis-cuda/.venv/bin/python",
+    "pixal3d": f"{REMOTE_ROOT}/vendor/pixal3d-cpp/.venv/bin/python",
 }
 
 #: The stamp a setup writes when it is done, so a warm session skips 20 minutes of install.

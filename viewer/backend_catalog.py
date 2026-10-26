@@ -1176,6 +1176,34 @@ COLAB_BACKENDS: tuple[Backend, ...] = (
                                 _colab_weight_note("The model, its image-large decoder and "
                                                    "the DINOv3 encoder,")),),
     ),
+    Backend(
+        id="colab-pixal3d",
+        label="Pixal3D (Colab GPU)",
+        kind="3d",
+        rank=4,
+        best_for=(
+            "The lab's sharpest single-pass engine, on a rented GPU: one run gives a "
+            "textured model, with no repaint stage to tune."
+        ),
+        tradeoff=(
+            "Costs Colab compute units. The first job on a fresh VM downloads 8.4 GB of "
+            "weights (about ten minutes) plus the Python packages; later jobs on that "
+            f"session are warm. The VM stops itself after {COLAB_IDLE_HOURS} idle hours."
+        ),
+        license_name="MIT (code + flow weights); DINOv3 License (bundled encoder)",
+        license_url="https://huggingface.co/raven38/pixal3d-sv-q8_0-v1",
+        install="Install the `colab` CLI and sign in: uv tool install google-colab-cli",
+        runs_on=(APPLE, NVIDIA, AMD),
+        setup_minutes=2,
+        automated_setup=False,
+        caveat=(
+            "Its runtime is a single prebuilt binary, which needs an NVIDIA driver from "
+            "the last few years (CUDA 12.9 or newer) on the rented card."
+        ),
+        weights=(_remote_weight("Pixal3D single-view Q8_0, with matting", 8.4,
+                                _colab_weight_note("The Q8_0 flows, the DINOv3 encoder and "
+                                                   "the BiRefNet matting model,")),),
+    ),
 )
 
 CATALOG = CATALOG + COLAB_BACKENDS

@@ -81,6 +81,9 @@ export function openCreate({ stage, recipes, engines, presets, frontBack = null,
     // A Colab engine runs somewhere that costs money and needs no install here. Both facts
     // belong on the sheet: "runs on your Mac" is the wrong expectation to leave someone with.
     const colab = Boolean(chosen?.remote);
+    // Pixal3D runs at one resolution; the 512³/1024³/1536³ ladder belongs to the Hi3D-style
+    // routes. Showing it here would sell a choice the engine silently ignores.
+    const colabDetail = colab && state.engine !== 'colab-pixal3d';
     const plan = planFor(state.have, state.want, { frontBack: state.frontBack && pixal && Boolean(frontBack?.ready) });
     if (state.stop && !plan.includes(state.stop)) state.stop = null;
     const active = stopAfter(plan, state.stop);
@@ -114,7 +117,7 @@ export function openCreate({ stage, recipes, engines, presets, frontBack = null,
           ${state.pic.newEachTime ? '' : `<label class="field">Seed<input type="number" data-pic="seed" step="1" value="${state.pic.seed}"></label>`}
         </div></details>` : ''}
       ${active.includes('model') ? `<details class="adv"><summary>Advanced: 3D model</summary>${engines.length > 1 ? `<label class="field">Engine<select data-k="engine">${engines.map((e, i) => `<option value="${esc(e.id)}" ${e.id === state.engine ? 'selected' : ''}>${i ? '' : 'Best quality: '}${esc(e.label)}</option>`).join('')}</select></label>` : ''}${colab ? `<label class="field">GPU<select data-k="accelerator">${[['G4', 'G4 — RTX PRO 6000, the fast one'], ['A100', 'A100 — 40 GB'], ['L4', 'L4 — cheaper, slower'], ['T4', 'T4 — cheapest, slowest'], ['H100', 'H100 — fastest, scarcest']].map(([id, label]) => `<option value="${id}" ${id === state.colab.accelerator ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
-        <label class="field">Detail<select data-k="resolution">${[[512, '512³ — quickest'], [1024, '1024³ — the usual choice'], [1536, '1536³ — slowest, sharpest']].map(([v, label]) => `<option value="${v}" ${v === state.colab.resolution ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
+        ${colabDetail ? `<label class="field">Detail<select data-k="resolution">${[[512, '512³ — quickest'], [1024, '1024³ — the usual choice'], [1536, '1536³ — slowest, sharpest']].map(([v, label]) => `<option value="${v}" ${v === state.colab.resolution ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></label>` : `<p class="hint">Pixal3D runs at its one resolution; there is no detail choice to make.</p>`}
         <p class="hint">Runs on a rented Google Colab GPU, not this Mac. Costs compute units from your own account, and the VM stops itself after three idle hours.</p>` : ''}${pixal && state.want !== 'set' ? (frontBack?.ready ? `<label class="check"><input type="checkbox" data-k="frontback" ${state.frontBack ? 'checked' : ''}><span>Front + back <span class="hint">draws the back too, so the sides and back match your picture instead of being guessed. A few minutes more on a Mac, under a minute on a Linux GPU.</span></span></label>` : frontBack?.hint ? `<p class="hint">Front + back is off. ${esc(frontBack.hint)}</p>` : '') : ''}<label class="check"><input type="checkbox" data-k="keep" ${state.keep ? 'checked' : ''}><span>Keep everything <span class="hint">textures, in-between meshes and resume files, for digging into a bad result. Takes a lot more disk.</span></span></label></details>` : ''}
       <p class="error" data-error hidden></p>
       <div class="row end"><span class="hint">${active.length} step${active.length === 1 ? '' : 's'}${active.includes('picture') ? ' · the picture uses Qwen-Image, run on this machine' : ''}</span><button type="submit" class="primary">Make it</button></div>
