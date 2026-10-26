@@ -239,27 +239,44 @@ def build_command(
     return command
 
 
+def hero_pixal_route() -> str:
+    """Where the route's Pixal3D calls run: this machine's trellis-cli, or a rented GPU.
+
+    Decided by availability, not by the body's origin: a machine with Pixal3D installed
+    builds the head locally whatever made the body (the head is a Pixal3D run of its own
+    and never touches the body's engine), and a machine without it -- the whole point of
+    the hosted engines -- sends the head, the crop upscale and the clean-up to Colab.
+    """
+    import backend_catalog
+
+    scripts = str(HERO_WORKER.parents[0])
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    try:
+        import pixal3d_generate
+
+        if pixal3d_generate.CLI.is_file():
+            return "local"
+    except ImportError:
+        pass
+    return "colab" if backend_catalog.colab_ready() else "local"
+
+
 def hero_command(job: FinishJob, settings: dict[str, Any]) -> list[str]:
-    """The hero route on this run's model: its body is the asset's own Pixal3D model, its head
-    is built again from a close crop. Everything it makes stays under steps/hero."""
+    """The hero route on this run's model: its body is the asset itself (a Pixal3D model
+    with its cameras, or any other engine's mesh keeping its own texture), its head is
+    built again from a close crop. Everything it makes stays under steps/hero."""
     record = job.input_dir / "source.json"
-    # A Colab-made model means no trellis-cli on this machine: the route's Pixal3D calls
-    # (the head build, the crop upscale, the head clean-up) must ride the supervisor. Read
-    # from the copied-in record, which the supervisor marks `"host": "colab"` on the way in.
-    pixal = "local"
-    if record.is_file():
-        try:
-            pixal = "colab" if json.loads(record.read_text()).get("host") == "colab" else "local"
-        except (json.JSONDecodeError, OSError):
-            pass
+    have_views = (job.views_dir / "transforms.json").is_file()
     return [
         sys.executable, "-u", str(HERO_WORKER), str(job.image_path),
         "--out", str((job.steps_dir or job.directory) / "hero"),
-        "--body", str(job.asset_path), "--body-views", str(job.views_dir),
+        "--body", str(job.asset_path),
+        *(["--body-views", str(job.views_dir)] if have_views else []),
         *(["--body-dump", str(job.dump_path)] if job.dump_path.is_file() else []),
         *(["--body-record", str(record)] if record.is_file() else []),
         "--body-faces", str(settings["faces"]),
-        "--pixal", pixal,
+        "--pixal", hero_pixal_route(),
         "--result", str(job.result_glb),
     ]
 
@@ -584,9 +601,10 @@ class FinishJobManager:
                     raise ValueError("Hero needs the picture the model was made from.")
                 views = None if job.settings["skip_photo"] and not hero else find_source_views(
                     asset, self.generated_root)
-                if hero and views is None:
-                    raise ValueError("Hero works on Pixal3D models made from a picture: this model has no "
-                                     "saved camera.")
+                # A body with no saved camera is fine for a hero: the cameras (and the
+                # clean-up dump below) are what a *Pixal3D* body brings, and the head --
+                # the part that needs them -- is a Pixal3D run of its own. A body from any
+                # other engine keeps its own texture and finishes the classic way.
                 if views is not None:
                     shutil.copytree(views, job.views_dir)
                 dump = find_source_dump(asset, self.generated_root)

@@ -1079,11 +1079,11 @@ def test_submitting_the_create_sheet_runs_clean_for_every_engine():
     for a local engine and a rented one, and asserts the plan it hands over."""
     out = _run("create.js", """
       const element = () => {
-        const store = {}, kids = {};
+        const store = { dataset: { face: 'hero' } }, kids = {};
         return new Proxy(store, {
           get: (t, p) => p in t ? t[p]
             : p === 'querySelector' ? (sel) => (kids[sel] ??= element())
-            : p === 'querySelectorAll' ? () => []
+            : p === 'querySelectorAll' ? (sel) => (kids['all:' + sel] ??= [element()])
             : () => {},
           set: (t, p, v) => { t[p] = v; return true; },
         });
@@ -1092,7 +1092,7 @@ def test_submitting_the_create_sheet_runs_clean_for_every_engine():
       globalThis.document = { createElement: () => { const el = element(); sheets.push(el); return el; },
                               addEventListener: () => {}, removeEventListener: () => {} };
       const engines = [
-        { id: 'colab-pixal3d', label: 'Pixal3D (Colab GPU)', kind: '3d', remote: true },
+        { id: 'colab-hi3d', label: 'Hi3D 1.0 (Colab GPU)', kind: '3d', remote: true },
         { id: 'pixal3d', label: 'Pixal3D', kind: '3d', remote: false },
       ];
       const plans = [];
@@ -1100,12 +1100,15 @@ def test_submitting_the_create_sheet_runs_clean_for_every_engine():
         sheets.length = 0;
         m.openCreate({ stage: element(), recipes: [], presets: [], engines: [engine],
                        prefill: { text: 'a red knight' }, onStart: (plan) => plans.push(plan) });
+        // Click "Hero face" the way the sheet's own handler does, then submit: a Hi3D body
+        // with a Pixal3D head is a supported plan now, so the finish settings must say hero.
+        sheets[0].querySelectorAll('[data-face]')[0].onclick();
         sheets[0].querySelector('form').onsubmit({ preventDefault: () => {} });
       }
       console.log(JSON.stringify(plans.map((p) => ({
         engine: p.engine, prompt: p.prompt, finish: p.finishSettings, colab: p.colabSettings }))));""")
-    assert [p["engine"] for p in out] == ["colab-pixal3d", "pixal3d"]
+    assert [p["engine"] for p in out] == ["colab-hi3d", "pixal3d"]
     assert all(p["prompt"] == "a red knight" for p in out)
-    assert all(p["finish"] is None for p in out)          # Quick face: no hero finish settings
+    assert all(p["finish"] == { "faces": 32000, "hero": True } for p in out)   # Hero face, on any engine
     assert out[0]["colab"] == {"accelerator": "G4", "resolution": 1024}
     assert out[1]["colab"] is None                        # a local engine ignores the GPU settings

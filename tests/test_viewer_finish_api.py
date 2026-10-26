@@ -715,13 +715,15 @@ def test_a_hero_run_starts_from_the_asset_s_own_model(tmp_path):
     assert job.result_glb.name.endswith("_hero.glb")
 
 
-def test_hero_needs_the_picture_and_the_model_s_camera(tmp_path):
+def test_hero_needs_the_picture_but_not_the_model_s_camera(tmp_path):
     manager = finish.FinishJobManager(tmp_path / "finish", tmp_path / "none")
     with pytest.raises(ValueError, match="picture"):
         manager.create("robot.glb", b"glb-bytes", None, {"hero": True})
+    # No saved camera is fine now: that is a Hi3D or TRELLIS body, which finishes the
+    # classic way and keeps its own texture. Only the picture is non-negotiable.
     manager = finish.FinishJobManager(tmp_path / "finish2", tmp_path / "none")
-    with pytest.raises(ValueError, match="saved camera"):
-        manager.create("robot.glb", b"glb-bytes", b"png", {"hero": True})
+    job = manager.create("robot.glb", b"glb-bytes", b"png", {"hero": True})
+    assert (job.input_dir / "source.glb").is_file()
 
 
 def test_a_failed_hero_run_leads_with_its_own_reason():
@@ -731,25 +733,109 @@ def test_a_failed_hero_run_leads_with_its_own_reason():
     assert finish.failure_message(["Traceback ...", "boom"], 1) == "worker exited with code 1"
 
 
-def test_a_colab_made_model_sends_its_pixal3d_calls_to_the_rented_gpu(tmp_path):
-    """A model from the colab-pixal3d engine has no trellis-cli behind it on this machine,
-    so Hero's head build, crop upscale and head clean-up must ride the supervisor. The
-    signal is the `"host": "colab"` mark the supervisor writes into the run's record."""
+def test_where_the_head_runs_follows_where_pixal3d_lives(monkeypatch, tmp_path):
+    """The head is a Pixal3D run of its own, so where it runs is decided by availability,
+    not by the body's engine: this machine's trellis-cli when installed, else the rented
+    GPU when the CLI is signed in. (Before, it followed the body's record, which sent a
+    head to Colab from machines that had a perfectly good local Pixal3D.)"""
+    import backend_catalog
+    import pixal3d_generate
+
     _pixal3d_run(tmp_path / "generated")
-    run = tmp_path / "generated" / "seb" / "robot__pixal3d__1"
-    (run / "robot__pixal3d__1.post.bin").write_bytes(b"dump")
-    record = json.loads((run / "robot__pixal3d__1.json").read_text())
-    (run / "robot__pixal3d__1.json").write_text(
-        json.dumps({**record, "host": "colab", "post_dump": "robot__pixal3d__1.post.bin"}))
-    manager = finish.FinishJobManager(tmp_path / "finish", tmp_path / "generated")
-    job = manager.create("robot.glb", b"glb-bytes", b"png", {"hero": True, "faces": 32000})
+    local_cli = tmp_path / "trellis-cli"
+    local_cli.write_bytes(b"bin")
+    monkeypatch.setattr(pixal3d_generate, "CLI", local_cli)
+    finish.FinishJobManager(tmp_path / "finish", tmp_path / "generated")
+    assert finish.hero_pixal_route() == "local"          # installed here: free and fast
+
+    monkeypatch.setattr(pixal3d_generate, "CLI", tmp_path / "not-here")
+    monkeypatch.setattr(backend_catalog, "_probe_colab", lambda *_a, **_k: True)
+    backend_catalog.forget_colab_readiness()
+    assert finish.hero_pixal_route() == "colab"           # not installed: rent it
+    monkeypatch.setattr(backend_catalog, "_probe_colab", lambda *_a, **_k: False)
+    backend_catalog.forget_colab_readiness()
+    assert finish.hero_pixal_route() == "local"           # nobody can: say so at the gate
+
+
+def test_a_foreign_body_gets_no_camera_flags_and_a_pixal3d_head(monkeypatch, tmp_path):
+    """A Hi3D body (no matching Pixal3D run) is accepted, its command carries no
+    --body-views/--body-dump, and the head still rides Pixal3D on the rented GPU."""
+    import backend_catalog
+    import pixal3d_generate
+
+    monkeypatch.setattr(pixal3d_generate, "CLI", tmp_path / "not-here")
+    monkeypatch.setattr(backend_catalog, "_probe_colab", lambda *_a, **_k: True)
+    backend_catalog.forget_colab_readiness()
+    manager = finish.FinishJobManager(tmp_path / "finish", tmp_path / "generated-empty")
+    job = manager.create("robot.glb", b"hi3d-bytes", b"png", {"hero": True, "faces": 32000})
     command = finish.hero_command(job, job.settings)
+    assert "--body-views" not in command and "--body-dump" not in command
+    assert command[command.index("--body") + 1] == str(job.asset_path)
     assert command[command.index("--pixal") + 1] == "colab"
 
 
-def test_a_local_model_keeps_hero_local(tmp_path):
-    _pixal3d_run(tmp_path / "generated")
-    manager = finish.FinishJobManager(tmp_path / "finish", tmp_path / "generated")
-    job = manager.create("robot.glb", b"glb-bytes", b"png", {"hero": True, "faces": 32000})
-    command = finish.hero_command(job, job.settings)
-    assert command[command.index("--pixal") + 1] == "local"
+# --- the frontend path: POST /api/finish with hero on a body from any engine ------------------
+
+def test_the_finish_endpoint_takes_a_hero_on_a_foreign_body(monkeypatch, tmp_path):
+    """The UI path the Create sheet drives: a Hi3D model (no Pixal3D run behind it) with
+    Hero face picked. The endpoint must accept it, and the worker command it starts must
+    ask for a Pixal3D head on the rented GPU with no camera flags on the body."""
+    import backend_catalog
+    import generate_api
+    import pixal3d_generate
+
+    monkeypatch.setattr(pixal3d_generate, "CLI", tmp_path / "not-here")
+    monkeypatch.setattr(backend_catalog, "_probe_colab", lambda *_a, **_k: True)
+    backend_catalog.forget_colab_readiness()
+    monkeypatch.setattr(generate_api, "find_blender", lambda: tmp_path / "blender")
+
+    started: list = []
+
+    def fake_runner(job, _manager=None):
+        started.append(job)
+        job.status = "done"
+
+    monkeypatch.setattr(generate_api, "run_finish_job", fake_runner)
+    monkeypatch.setattr(generate_api, "FINISH_JOBS", finish.FinishJobManager(
+        tmp_path / "finish", tmp_path / "no-generated"))
+
+    import http.server
+    import threading
+    import urllib.request
+    import uuid
+
+    def post(asset: bytes, image: bytes | None, settings: str) -> tuple[int, dict]:
+        boundary = f"----i2l{uuid.uuid4().hex}"
+        parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="asset"; '
+                 f'filename="knight.glb"\r\nContent-Type: model/gltf-binary\r\n\r\n'
+                 .encode() + asset + b"\r\n"]
+        if image is not None:
+            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="image"; '
+                         f'filename="knight.png"\r\nContent-Type: image/png\r\n\r\n'
+                         .encode() + image + b"\r\n")
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="settings"\r\n'
+                     f'\r\n{settings}\r\n'.encode())
+        parts.append(f"--{boundary}--\r\n".encode())
+        request = urllib.request.Request(
+            "http://127.0.0.1:1/api/finish", data=b"".join(parts),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), generate_api.Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            request.full_url = f"http://127.0.0.1:{server.server_port}/api/finish"
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    return response.status, json.load(response)
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.load(exc)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    status, _body = post(b"hi3d-glb-bytes", None, '{"hero": true}')
+    assert status == 422                       # a hero still needs its picture, on any engine
+    status, _body = post(b"hi3d-glb-bytes", b"png-bytes", '{"hero": true, "faces": 32000}')
+    assert status == 202 and len(started) == 1
+    command = finish.hero_command(started[0], started[0].settings)
+    assert "--body-views" not in command and "--body-dump" not in command
+    assert command[command.index("--pixal") + 1] == "colab"

@@ -81,9 +81,10 @@ export function openCreate({ stage, recipes, engines, presets, frontBack = null,
     // A Colab engine runs somewhere that costs money and needs no install here. Both facts
     // belong on the sheet: "runs on your Mac" is the wrong expectation to leave someone with.
     const colab = Boolean(chosen?.remote);
-    // Hero face runs on either Pixal3D engine: its head build rides the rented GPU when the
-    // model came from there (finish_api passes --pixal colab by the run's record).
-    const heroable = pixal || state.engine === 'colab-pixal3d';
+    // Hero face on any engine: the head is a Pixal3D run of its own, so the body's engine
+    // is free (Hi3D's mesh with its own texture is exactly what someone may want). The
+    // head rides the rented GPU when Pixal3D is not installed here.
+    const heroable = true;
     // Pixal3D runs at one resolution; the 512³/1024³/1536³ ladder belongs to the Hi3D-style
     // routes. Showing it here would sell a choice the engine silently ignores.
     const colabDetail = colab && state.engine !== 'colab-pixal3d';
@@ -193,7 +194,7 @@ export function openCreate({ stage, recipes, engines, presets, frontBack = null,
         // settings and a local route ignores them.
         colabSettings: active.includes('model') && engines.find((e) => e.id === state.engine)?.remote
           ? { ...state.colab } : null,
-        finishSettings: heroWanted(state, active, state.engine === 'pixal3d' || state.engine === 'colab-pixal3d') ? { faces: 32000, hero: true } : null });
+        finishSettings: heroWanted(state, active, true) ? { faces: 32000, hero: true } : null });
     };
     text?.focus();
   }
@@ -239,7 +240,7 @@ export function heroChoice(state, active, pixal) {
   return `<div class="q"><span class="qn">4</span><b>Face</b></div>
       <div class="wants faces">
         <button type="button" class="kind" data-face="quick" aria-pressed="${!hero}"><b>Quick</b><small>The usual Finish. Fine for most characters, and props.</small></button>
-        <button type="button" class="kind${pixal ? '' : ' off'}" data-face="hero" aria-pressed="${hero}"${off}><b>Hero face</b><small>Builds the head again from a close, sharper crop: real eyelids instead of goggle eyes. Takes longer.</small></button>
+        <button type="button" class="kind${pixal ? '' : ' off'}" data-face="hero" aria-pressed="${hero}"${off}><b>Hero face</b><small>Builds the head again from a close, sharper crop with Pixal3D (on a rented GPU when it is not installed here): real eyelids instead of goggle eyes. Takes longer.</small></button>
       </div>`;
 }
 

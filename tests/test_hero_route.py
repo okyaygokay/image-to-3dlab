@@ -70,14 +70,20 @@ def test_a_body_with_cameras_and_a_dump_is_accepted(tmp_path):
     assert hero_route.body_problem(*_body(tmp_path)) is None
 
 
-def test_a_body_without_cameras_is_refused(tmp_path):
-    assert "cameras" in hero_route.body_problem(*_body(tmp_path, views=False))
+def test_a_body_from_another_engine_has_neither_file_and_is_fine(tmp_path):
+    """The point of the route change: a Hi3D or TRELLIS body has no cameras and no dump,
+    and is accepted -- it finishes the classic way and keeps its own texture."""
+    body, _folder, _post = _body(tmp_path)
+    assert hero_route.body_problem(body, None, None) is None
 
 
-def test_a_body_without_its_clean_up_dump_is_refused_in_plain_words(tmp_path):
-    """Without the dump the body kept its raw million triangles, silently."""
-    problem = hero_route.body_problem(*_body(tmp_path, dump=False))
-    assert problem and "again" in problem
+def test_cameras_that_point_at_nothing_are_an_error_in_plain_words(tmp_path):
+    """Someone *asked* for Pixel Match on a body that cannot have it: a --body-views
+    directory with no transforms.json is a mistake, not a fallback."""
+    body, _folder, post = _body(tmp_path)
+    empty = tmp_path / "no-cameras"
+    empty.mkdir()
+    assert "transforms.json" in hero_route.body_problem(body, empty, post)
 
 
 def test_no_body_given_is_no_problem():
@@ -184,6 +190,8 @@ def test_needed_parts_in_colab_mode_drops_the_model_parts(monkeypatch, tmp_path)
 
     rig = types.ModuleType("autorig_api")
     rig.venv_python = lambda root=None: tmp_path / "rig-python"
+    rig.installed = lambda root=None: False
+    rig.colab_ready = lambda: False   # not signed in: the rigger is demanded locally
     repaint = types.ModuleType("retopo_repaint")
     repaint.find_blender = lambda: tmp_path / "blender"
     # setitem, not a bare assignment: monkeypatch puts the real modules back afterwards,

@@ -148,16 +148,19 @@ def needed_parts(colab: bool = False) -> dict[str, Path]:
     """Everything the route runs, by what to install to get it.
 
     In the colab mode the model parts (trellis-cli, the upscaler, post-replay) live on the
-    rented VM, so requiring them here would refuse a route that is about to work; the local
-    parts that remain -- the throwaway rigger and Blender -- are checked as usual.
+    rented VM, so requiring them here would refuse a route that is about to work. The
+    throwaway rigger rides the same VM when SkinTokens is not installed here (which is
+    also what the Animate tab does); only when neither machine has one is it a local
+    install to demand. Blender stays local in every mode: Finish is a local step.
     """
     import autorig_api
     import retopo_repaint
 
     parts = {
-        "Auto-rig (finds the head)": autorig_api.venv_python(),
         "Blender (Finish)": retopo_repaint.find_blender() or Path("/missing/blender"),
     }
+    if autorig_api.installed() or not (colab and autorig_api.colab_ready()):
+        parts["Auto-rig (finds the head)"] = autorig_api.venv_python()
     if not colab:
         import pixal3d_generate
 
@@ -181,14 +184,19 @@ NO_DUMP_BUILD = ("Pixal3D on this machine can't save its clean-up data, which th
 
 
 def body_problem(body: Path | None, views: Path | None, dump: Path | None) -> str | None:
-    """Why an existing model cannot be the Hero body, in plain words, or None."""
+    """Why an existing model cannot be the Hero body, in plain words, or None.
+
+    The cameras and the clean-up dump are optional: they are what a *Pixal3D* body brings
+    (Pixel Match on the body, Pixal3D's own retopo), and a body from any other engine
+    (Hi3D, TRELLIS, ...) has neither -- it finishes the classic way and keeps its own
+    texture, which is the point of choosing that engine for the mesh. Only a *named*
+    --body-views that points at no transforms.json is an error: someone asked for Pixel
+    Match on a body that cannot have it.
+    """
     if body is None:
         return None
-    if not (views and (Path(views) / "transforms.json").is_file()):
-        return ("the body model needs its cameras (--body-views with transforms.json): the hero "
-                "route works on Pixal3D models made from a picture.")
-    if not (dump and Path(dump).is_file()):
-        return NO_DUMP
+    if views and not (Path(views) / "transforms.json").is_file():
+        return "the body's cameras (--body-views) hold no transforms.json"
     return None
 
 
@@ -228,10 +236,23 @@ def replay_command(colab: bool, dump: Path, output: Path, faces: int, atlas: int
             "--atlas", str(int(atlas))]
 
 
-def finish(run: Run, model: Path, picture: Path, views: Path, out: Path, faces: int, dump: Path | None) -> None:
+def finish(run: Run, model: Path, picture: Path, views: Path | None, out: Path, faces: int,
+           dump: Path | None) -> None:
+    """Finish one model: retopo to FACES, and Pixel Match when its run's cameras exist.
+
+    `views` is None for a body from another engine (no .svviews behind it): the run then
+    has no photo stage and the model keeps its own texture. `dump` is None when the body
+    is not a Pixal3D model: the clean-up is the classic route. A Pixal3D body whose dump
+    was lost still keeps its mesh (--keep-mesh), as before.
+    """
     command = [PYTHON, "-u", FINISH, model, picture, out, "--steps-dir", out.with_suffix(".steps"),
-               "--views", views, "--faces", str(faces), *FINISH_FLAGS]
-    command += ["--native-dump", dump] if dump else ["--keep-mesh"]
+               "--faces", str(faces), *FINISH_FLAGS]
+    if views is not None:
+        command += ["--views", views]
+    if dump:
+        command += ["--native-dump", dump]
+    elif views is not None:
+        command += ["--keep-mesh"]
     run.run(command)
     record = json.loads(out.with_suffix(".retopo-repaint.json").read_text())
     route = (record.get("retopology") or {}).get("route")
@@ -334,11 +355,20 @@ def main() -> int:
         run.run(pixal_command(colab, picture, body_raw, "--seed", str(args.seed),
                               *(["--back", str(back)] if back else [])))
     body = out / "body.glb"
-    if run.step(f"body: Finish {args.body_faces} + Pixel Match", body):
-        dump = body_raw.with_suffix(".post.bin")
-        if not dump.is_file():
+    body_views = body_raw.with_suffix(".svviews")
+    have_views = (body_views / "transforms.json").is_file()
+    dump = body_raw.with_suffix(".post.bin")
+    label = f"body: Finish {args.body_faces}" + (" + Pixel Match" if have_views
+                                                 else " (its own texture)")
+    if run.step(label, body):
+        # A body this run just built with Pixal3D always has its dump; missing means the
+        # build predates the patch, and the classic route would shatter its hair exactly
+        # where the head is about to be judged. A body handed in from another engine
+        # (Hi3D, TRELLIS, ...) has neither file, by design.
+        if not args.body and not dump.is_file():
             raise SystemExit(f"[hero] {NO_DUMP}")
-        finish(run, body_raw, picture, body_raw.with_suffix(".svviews"), body, args.body_faces, dump)
+        finish(run, body_raw, picture, body_views if have_views else None, body,
+               args.body_faces, dump if dump.is_file() else None)
 
     # 2. measure
     stage(run, "measure", "Finding the head")
@@ -346,9 +376,15 @@ def main() -> int:
     if run.step("measure: throwaway rig", rig):
         import autorig_api
 
+        # The rigger runs wherever a rigger exists: here when installed, else on the rented
+        # GPU -- the same fallback the Animate tab uses, and the only way a Mac with no
+        # local SkinTokens gets a hero at all.
+        commands = (autorig_api.rig_commands(body, rig) if autorig_api.installed()
+                    or not autorig_api.colab_ready()
+                    else autorig_api.remote_rig_commands(body, rig))
         # The rigger's own Blender server sometimes answers its first request badly
         # (BadStatusLine on the long-haired woman); a second go is cheap next to a lost run.
-        for command, cwd in autorig_api.rig_commands(body, rig):
+        for command, cwd in commands:
             run.run(command, cwd=cwd, tries=2)
 
     # 3. crop

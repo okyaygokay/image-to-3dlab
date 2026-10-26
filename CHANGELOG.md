@@ -14,10 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`.json`), clean-up dump (`.post.bin`) and cameras (`.svviews/`) beside the GLB, so
     Finish's Pixel Match and the Pixal3D retopo route work on Colab-made models, not just
     the classic one. The record is marked `"host": "colab"` on the way in.
-  - *Hero face on Colab models.* The route gained `--pixal colab`: the head build, the
-    Real-ESRGAN crop upscale and the head clean-up all ride the supervisor (the VM's venv
-    now keeps torch for the upscale, and `--exec`/`--exec-bin` run one repo script or
-    binary on a VM). Create offers Hero face for both Pixal3D engines.
+  - *Hero face on any engine's body.* The head is a Pixal3D run of its own, so the body's
+    engine is free: a Hi3D mesh with its own texture gets a Pixal3D head. Where the head
+    runs follows where Pixal3D lives (this machine's trellis-cli when installed, else the
+    rented GPU, along with the crop upscale, the head clean-up and the throwaway
+    head-finding rig when SkinTokens is not installed here either).
   - *The picture step* (Create's "start from a description") draws through Qwen-Image on a
     rented GPU when no local sd-cli exists (`qwen_image_colab.py`; the VM compiles the
     pinned stable-diffusion.cpp commit with CUDA — upstream ships no Linux CUDA build).

@@ -104,11 +104,18 @@ to this route instead of refusing:
 
 A local Pixal3D run writes more than the GLB, and Finish needs exactly those files, so the
 supervisor downloads them beside the GLB: the run record (`.json`), the clean-up dump
-(`.post.bin`) and the camera views (`.svviews/`). The record is marked `"host": "colab"`
-on the way in — which is also how Hero knows to send its own Pixal3D calls (the head
-build, the crop upscale, the head clean-up) back to a rented GPU instead of looking for a
-trellis-cli this machine never had. Pixel Match works on Colab-made models for the same
-reason: the cameras are here now.
+(`.post.bin`) and the camera views (`.svviews/`). Pixel Match works on Colab-made models
+for the same reason: the cameras are here now.
+
+### Hero face on any engine's body
+
+The hero route's body can be any engine's mesh — Hi3D for the geometry with Pixal3D for
+the head is a good pairing. Where the head's Pixal3D calls run is decided by availability,
+not by the body's origin: this machine's trellis-cli when it is installed, else the rented
+GPU (`--pixal colab`, and the throwaway head-finding rig rides the same VM when no local
+SkinTokens exists). A Pixal3D body brings its cameras and dump and gets Pixel Match; a
+body from another engine has neither and keeps its own texture through the classic
+clean-up, which is usually why that engine was chosen for the mesh.
 
 ### Which accelerator
 
