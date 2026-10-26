@@ -30,9 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Rented Google Colab GPUs as first-class engines.** Hi3D, Hunyuan3D-2.1 and TRELLIS.2
   run on a Colab VM from a Mac with no NVIDIA card. `scripts/colab_generate.py` rents the
   GPU, installs out there, runs the same wrapper, and streams the same stage lines, so the
-  job runner needs no new path. `colab-hi3d`, `colab-hunyuan` and `colab-trellis` appear in
-  Create's engine picker and in Setup & Status, ready as soon as the `colab` CLI is signed
-  in and without a single model byte on this disk. See
+  job runner needs no new path. `colab-hi3d`, `colab-hunyuan`, `colab-trellis` and
+  `colab-pixal3d` appear in Create's engine picker and in Setup & Status, ready as soon as
+  the `colab` CLI is signed in and without a single model byte on this disk. See
   [docs/colab-gpu.md](docs/colab-gpu.md).
   - Warm sessions are reused, so a second job starts in seconds instead of paying a
     15-30 minute install per click; idle ones are reaped at the start of each job.

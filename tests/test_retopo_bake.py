@@ -196,3 +196,76 @@ def test_the_ratio_never_exceeds_one():
 
 def test_a_degenerate_mesh_does_not_divide_by_zero():
     assert retopo.decimate_ratio(40000, 0) == 1.0
+
+
+# --------------------------------------------------------------------------- flat colour
+# Real bug, from a live run: Hi3D emits geometry plus a flat `baseColorFactor` and no
+# texture at all, because painting is a separate stage. The bake refused it with
+# "could not find the base colour texture to transfer" -- which reads as a corrupt file to
+# anyone whose model simply has no texture by design, and blocked Finish on the whole route.
+
+
+class _Socket:
+    def __init__(self, value=None, linked=False):
+        self.default_value = value
+        self.is_linked = linked
+        self.links = []
+
+
+class _Node:
+    def __init__(self, kind, socket=None):
+        self.type = kind
+        self.inputs = {"Base Color": socket} if socket is not None else {}
+
+
+class _Material:
+    def __init__(self, nodes, use_nodes=True):
+        self.node_tree = type("T", (), {"nodes": nodes})()
+        self.use_nodes = use_nodes
+
+
+def test_a_flat_base_colour_is_found_when_there_is_no_texture():
+    material = _Material([_Node("BSDF_PRINCIPLED", _Socket((0.8, 0.75, 0.7, 1.0)))])
+    assert retopo.base_colour_image(material) is None
+    assert retopo.flat_base_colour(material) == pytest.approx((0.8, 0.75, 0.7))
+
+
+def test_a_textured_material_has_no_flat_colour_to_use():
+    """A linked Base Color is the texture's job; reading the socket underneath it would
+    bake the wrong thing over a perfectly good map."""
+    socket = _Socket((0.5, 0.5, 0.5, 1.0), linked=True)
+    assert retopo.flat_base_colour(_Material([_Node("BSDF_PRINCIPLED", socket)])) is None
+
+
+def test_a_black_material_is_not_a_colour_to_bake():
+    """Zero everywhere is a material with nothing to say, not a grey asset."""
+    assert retopo.flat_base_colour(
+        _Material([_Node("BSDF_PRINCIPLED", _Socket((0.0, 0.0, 0.0, 1.0)))])
+    ) is None
+
+
+def test_no_material_means_no_flat_colour():
+    assert retopo.flat_base_colour(None) is None
+    assert retopo.flat_base_colour(_Material([], use_nodes=False)) is None
+
+
+def test_the_flat_colour_image_is_small_and_opaque():
+    """8x8 is exact: Closest interpolation samples one value, and the bake target is the
+    atlas. A full-size image would hold 4 megapixels of a single colour."""
+
+    class _Image:
+        def __init__(self, name, width, height, alpha):
+            self.name, self.size, self.alpha = name, [width, height], alpha
+            self.pixels = [0.0] * (width * height * 4)
+            self.packed = False
+
+        def pack(self):
+            self.packed = True
+
+    fake_bpy = type("B", (), {"data": type("D", (), {"images": type("I", (), {"new": staticmethod(_Image)})})})
+    image = retopo.solid_image((0.25, 0.5, 0.75), 8, "flat", fake_bpy)
+
+    assert image.size == [8, 8]
+    assert image.packed is True
+    assert image.pixels[:4] == pytest.approx([0.25, 0.5, 0.75, 1.0])
+    assert len(image.pixels) == 8 * 8 * 4

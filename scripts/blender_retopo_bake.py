@@ -133,6 +133,49 @@ def base_colour_image(material):
     return None
 
 
+def flat_base_colour(material):
+    """The material's constant Base Color as (r, g, b), or None.
+
+    A glTF material with no texture still has a colour: `pbrMetallicRoughness.baseColorFactor`
+    becomes the Principled BSDF's unlinked Base Color. Hi3D produces exactly this -- geometry
+    and a flat tone, because painting is a separate stage -- and the bake used to refuse it
+    with "could not find the base colour texture to transfer", which reads as a corrupt file
+    to anyone whose model simply has no texture by design.
+    """
+    if not material or not material.use_nodes:
+        return None
+    for node in material.node_tree.nodes:
+        if node.type != "BSDF_PRINCIPLED":
+            continue
+        socket = node.inputs.get("Base Color")
+        if socket is None or socket.is_linked:
+            continue
+        value = socket.default_value
+        try:
+            rgb = tuple(float(channel) for channel in value[:3])
+        except (TypeError, IndexError):
+            continue
+        # Pre-multiplied alpha can leave a colour of exactly 0 everywhere; that is a
+        # material with nothing to say, not a grey asset to bake.
+        if any(channel > 0.0 for channel in rgb):
+            return rgb
+    return None
+
+
+def solid_image(colour, size, name, bpy):
+    """A small constant image of `colour`, for baking a material that has no texture.
+
+    Deliberately tiny: the source is sampled with Closest interpolation and the bake target
+    is the full atlas, so 8x8 is exact and costs nothing. Making it `size` would allocate a
+    4-megapixel image to hold one value.
+    """
+    image = bpy.data.images.new(name, width=size, height=size, alpha=True)
+    red, green, blue = colour
+    image.pixels[:] = [red, green, blue, 1.0] * (size * size)
+    image.pack()
+    return image
+
+
 def ray_distance(dimensions, fraction: float = 0.005) -> float:
     """How far the bake may search from the new surface to find the old one.
 
@@ -163,7 +206,20 @@ def main() -> int:
     material = original.data.materials[0] if original.data.materials else None
     image = base_colour_image(material)
     if image is None:
-        raise SystemExit("could not find the base colour texture to transfer")
+        # No texture is not a broken file. Hi3D emits geometry plus a flat tone and leaves
+        # painting to a later stage, so the honest thing to transfer is that tone; failing
+        # here refused a perfectly good mesh with a message about a texture that was never
+        # meant to exist.
+        colour = flat_base_colour(material)
+        if colour is None:
+            raise SystemExit(
+                "this model has no base colour texture and no flat colour to transfer, so "
+                "there is nothing to bake. Paint it first (Finish's repaint or Pixel Match), "
+                "or pass --skip-bake."
+            )
+        image = solid_image(colour, 8, "flat_base_colour", bpy)
+        print("RETOPO:: no texture; baking the material's flat base colour "
+              f"({colour[0]:.3f}, {colour[1]:.3f}, {colour[2]:.3f})")
     print(f"RETOPO:: in faces={len(original.data.polygons):,} texture={image.size[0]}px")
 
     # --- clean topology ---------------------------------------------------------------
