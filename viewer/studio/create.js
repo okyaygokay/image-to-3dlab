@@ -193,7 +193,7 @@ export function openCreate({ stage, recipes, engines, presets, frontBack = null,
         // settings and a local route ignores them.
         colabSettings: active.includes('model') && engines.find((e) => e.id === state.engine)?.remote
           ? { ...state.colab } : null,
-        finishSettings: heroWanted(state, active, pixal || state.engine === 'colab-pixal3d') ? { faces: 32000, hero: true } : null });
+        finishSettings: heroWanted(state, active, state.engine === 'pixal3d' || state.engine === 'colab-pixal3d') ? { faces: 32000, hero: true } : null });
     };
     text?.focus();
   }

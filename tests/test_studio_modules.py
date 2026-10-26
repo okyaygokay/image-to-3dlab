@@ -1069,3 +1069,43 @@ def test_copy_details_copies_what_the_server_scrubbed_and_nothing_if_it_cannot()
     assert out["copied"] == ["~/x.log", "z"]          # the server's text, never the raw log
     assert out["url"] == "/api/bug-report" and out["size"] == 30000
     assert out["fallback"] == "A step failed"         # the server refuses an empty message
+
+
+@needs_node
+def test_submitting_the_create_sheet_runs_clean_for_every_engine():
+    """A ReferenceError once shipped in this path (an identifier from the render scope used
+    in the submit handler), and nothing noticed until a user clicked Make it: the exported
+    helpers were tested, the handler was not. This runs the real handler under a stub DOM,
+    for a local engine and a rented one, and asserts the plan it hands over."""
+    out = _run("create.js", """
+      const element = () => {
+        const store = {}, kids = {};
+        return new Proxy(store, {
+          get: (t, p) => p in t ? t[p]
+            : p === 'querySelector' ? (sel) => (kids[sel] ??= element())
+            : p === 'querySelectorAll' ? () => []
+            : () => {},
+          set: (t, p, v) => { t[p] = v; return true; },
+        });
+      };
+      const sheets = [];
+      globalThis.document = { createElement: () => { const el = element(); sheets.push(el); return el; },
+                              addEventListener: () => {}, removeEventListener: () => {} };
+      const engines = [
+        { id: 'colab-pixal3d', label: 'Pixal3D (Colab GPU)', kind: '3d', remote: true },
+        { id: 'pixal3d', label: 'Pixal3D', kind: '3d', remote: false },
+      ];
+      const plans = [];
+      for (const engine of engines) {
+        sheets.length = 0;
+        m.openCreate({ stage: element(), recipes: [], presets: [], engines: [engine],
+                       prefill: { text: 'a red knight' }, onStart: (plan) => plans.push(plan) });
+        sheets[0].querySelector('form').onsubmit({ preventDefault: () => {} });
+      }
+      console.log(JSON.stringify(plans.map((p) => ({
+        engine: p.engine, prompt: p.prompt, finish: p.finishSettings, colab: p.colabSettings }))));""")
+    assert [p["engine"] for p in out] == ["colab-pixal3d", "pixal3d"]
+    assert all(p["prompt"] == "a red knight" for p in out)
+    assert all(p["finish"] is None for p in out)          # Quick face: no hero finish settings
+    assert out[0]["colab"] == {"accelerator": "G4", "resolution": 1024}
+    assert out[1]["colab"] is None                        # a local engine ignores the GPU settings
