@@ -42,18 +42,29 @@ that the session is warm; a second job is just the generation.
 | `--accelerator` | `G4` | `G4`, `A100`, `L4`, `T4`, `H100` |
 | `--session` | a warm one, else new | Use this VM by name (implies `--keep`) |
 | `--new-session` | off | Rent a fresh VM and pay the install again |
+| `--no-share` | off | Skip the lab's shared VM; a private session per job, stopped when it ends |
 | `--keep` | off | Leave the VM running when the job finishes |
 | `--skip-setup` | off | Trust an existing install on the VM |
 | `--yes` | off | Skip the confirmation (the studio passes this after its own dialog) |
 | `--exec` | off | Run one repo *script* on the VM instead of a generation (below) |
 
-### Warm sessions
+### Warm sessions, and the lab's shared VM
 
 A fresh VM installs for 15–30 minutes before it can do anything. That is fine once and
 unusable per job, so a run **reuses a session that is still inside its idle window** —
 it already has the venv and the weights, and the job starts in seconds. Only sessions this
 lab started for the *same backend* are candidates; a Hunyuan job will not be handed Hi3D's
 venv. `--new-session` is for a clean-room run, and `--session NAME` pins one explicitly.
+
+On top of that, the studio's runs land on **one shared VM** (`i2l-lab`): if none is live,
+a job starts one, and every later job lands on it while it is live and idle. Every
+backend's install serves every job there, so a picture model's GLB can be rigged the next
+click without waiting for Autorig's 15-minute install. While a job runs there,
+`scripts/colab_prefetch.py` installs the *other* backends onto it in the background (one
+at a time, disk-guarded, and the big ones wait for the GPU to free up). The shared VM is
+never stopped by a job — the 3-hour idle rule reaps it — and a job that finds it busy with
+another job (one GPU, one job) rents a private session exactly as before. `--no-share`
+opts out of the whole arrangement, and `--new-session` never touches it.
 
 Idle sessions are reaped at the start of each job (that is the only long-lived process the
 lab runs regularly), as well as by the 3-hour rule.
@@ -157,7 +168,8 @@ card on your account; the supervisor says so instead of retrying forever.
 
 A rented GPU costs Colab compute units from your account, by the second.
 
-- **The session stops when the job finishes**, unless you pass `--keep`.
+- **The session stops when the job finishes**, unless you pass `--keep` — or it is the
+  lab's shared VM, which is left for the idle rule so the next step starts instantly.
 - **Every session stops after three hours without a heartbeat.** Every call that talks to
   Colab refreshes one; `stop_idle_sessions()` is what acts on it.
 - A session whose heartbeat is *unknown* is never treated as idle. Not knowing is not
@@ -171,6 +183,13 @@ To stop one by hand: `colab stop -s <session>`, or `colab sessions` to see what 
 hiccup in the middle would lose the whole thing. So the supervisor starts the real work
 with `start_new_session=True`, writes a token file, and polls the VM's status file and log
 over the REST contents API — which keeps working while the kernel is busy.
+
+The contents API also has a size ceiling per call, so big files cross the link in
+proven-sized pieces both ways: uploads are split locally and reassembled on the VM,
+downloads are split on the VM and reassembled here — checksum-checked either way, because
+the one file a later step needs (a head's ~460 MB clean-up dump, say) failing quietly
+once cost a hero run an hour in. A *declared* artifact that exists on the VM but will not
+come back fails the fetch, named; one the wrapper never wrote is still skipped quietly.
 
 The supervisor itself is an ordinary local process printing ordinary stage lines, which is
 why the studio can watch it exactly like a local run.

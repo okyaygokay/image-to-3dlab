@@ -48,6 +48,12 @@ DEFAULT_ACCELERATOR = "G4"
 #: cold cache, short enough that a forgotten session does not cost a night's compute.
 IDLE_STOP_SECONDS = 3 * 60 * 60
 
+#: The one session the whole lab shares when sharing is on: any backend's job may land
+#: on it, and while a job runs there the supervisor installs the *other* backends on it
+#: in the background, so the next step starts in seconds instead of quarter-hours. It is
+#: never stopped by a job -- the idle window reaps it, like any other session.
+SHARED_SESSION = "i2l-lab"
+
 #: How often the supervisor re-reads the remote status file while a job runs.
 POLL_SECONDS = 15
 
@@ -223,6 +229,17 @@ def live_sessions() -> set[str]:
     return found
 
 
+def shared_session(live: set[str] | None = None) -> str | None:
+    """The lab's shared VM when it is live, else None.
+
+    Sharing is the studio's default because one warm VM with every backend installed is
+    what makes a second click start instantly; `--no-share` on the supervisor rents the
+    old private per-job VMs instead.
+    """
+    running = live_sessions() if live is None else live
+    return SHARED_SESSION if SHARED_SESSION in running else None
+
+
 def warm_session(backend_id: str, *, path: Path | None = None,
                  now: float | None = None, live: set[str] | None = None) -> str | None:
     """A live, recently-used session for this backend, or None.
@@ -258,6 +275,16 @@ def warm_session(backend_id: str, *, path: Path | None = None,
 
 class ColabError(RuntimeError):
     """The CLI failed, or did not answer. Callers turn this into a job error."""
+
+
+class RemoteMissing(ColabError):
+    """The remote file is not on the session at all — nothing to fetch, ever.
+
+    Distinct from a failed fetch on purpose: a wrapper that wrote no dump (an unpatched
+    build, say) must not fail an otherwise good run, while a dump that exists and will
+    not come back must fail it *here*, named — not three steps later as
+    "input file does not exist".
+    """
 
 
 def colab_bin() -> str:
@@ -376,6 +403,75 @@ def upload(session: str, local: Path, remote: str, *, timeout: float = 600) -> N
         f"if digest != {digest!r}: raise SystemExit('checksum mismatch after reassembly')\n"
     )
     run(["exec", "-s", session, "--timeout", "600"], stdin=code, timeout=700, attempts=3)
+
+
+def download(session: str, remote: str, local: Path, *, timeout: float = 600) -> None:
+    """Download `remote` from the session to `local`, however large it is.
+
+    Small files go straight through `colab download`. A big one is split into parts on
+    the session, the parts are fetched, and they are concatenated and checksum-checked
+    here — the mirror of `upload`, because the link is the same in both directions.
+    Found the hard way: a head's ~460 MB clean-up dump failed all three one-piece
+    attempts twenty minutes after a 208 MB one came back fine, and the silent skip cost
+    an hour-old hero run its head.
+    """
+    local = Path(local)
+    probe = run(["exec", "-s", session, "--timeout", "120"],
+                stdin="import hashlib, os\n"
+                      f"print('MISSING') if not os.path.exists({remote!r}) else "
+                      f"print('SIZE', os.path.getsize({remote!r}), "
+                      f"hashlib.md5(open({remote!r}, 'rb').read()).hexdigest())\n",
+                timeout=180, attempts=3)
+    match = re.search(r"SIZE (\d+) ([0-9a-f]{32})", probe or "")
+    if match is None:
+        if "MISSING" in (probe or ""):
+            raise RemoteMissing(f"{remote} is not on the session")
+        raise ColabError(f"could not stat {remote} on session {session!r}")
+    size, digest = int(match.group(1)), match.group(2)
+
+    def _check() -> None:
+        got = (hashlib.md5(local.read_bytes()).hexdigest()
+               if local.is_file() else "")
+        if got != digest:
+            raise ColabError(f"{remote} came back wrong after {local.stat().st_size if local.is_file() else 0} "
+                             f"of {size} bytes (checksum mismatch)")
+
+    if size <= UPLOAD_CHUNK:
+        run(["download", remote, str(local), "-s", session], timeout=timeout, attempts=3)
+        _check()
+        return
+
+    parts = (size + UPLOAD_CHUNK - 1) // UPLOAD_CHUNK
+    run(["exec", "-s", session, "--timeout", "600"],
+        stdin="import os\n"
+              f"src, chunk = {remote!r}, {UPLOAD_CHUNK}\n"
+              "index = 0\n"
+              "with open(src, 'rb') as f:\n"
+              "    while block := f.read(chunk):\n"
+              "        with open(f'{src}.part{index:04d}', 'wb') as out:\n"
+              "            out.write(block)\n"
+              "        index += 1\n"
+              "print('PARTS', index)\n",
+        timeout=700, attempts=3)
+    name = remote.rsplit("/", 1)[1]
+    with tempfile.TemporaryDirectory(prefix="i2l-dl-") as scratch:
+        for index in range(parts):
+            run(["download", f"{remote}.part{index:04d}",
+                 str(Path(scratch) / f"{name}.part{index:04d}"), "-s", session],
+                timeout=timeout, attempts=3)
+        local.parent.mkdir(parents=True, exist_ok=True)
+        with local.open("wb") as out:
+            for index in range(parts):
+                out.write((Path(scratch) / f"{name}.part{index:04d}").read_bytes())
+    _check()
+    # the file is safe here; leftover parts would only cost the VM disk until it stops
+    try:
+        run(["exec", "-s", session, "--timeout", "120"],
+            stdin="import glob, os\n"
+                  f"for part in glob.glob({remote + '.part*'!r}): os.remove(part)\n",
+            timeout=180)
+    except ColabError:
+        pass
 
 
 def ensure_session(config: RemoteConfig, *, log=lambda message: None) -> None:

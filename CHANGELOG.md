@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **One warm Colab VM for the whole lab, with the other backends installing onto it while
+  a job runs.** Every step's next click used to pay the same 15–30 minute VM install the
+  last one did. Jobs now land on one shared session (`i2l-lab`), started by the first job
+  that needs a GPU and kept for the idle window to reap, so the second click starts in
+  seconds. While a job runs there, `scripts/colab_prefetch.py` installs the *other*
+  backends on it in the background — one at a time, disk-guarded, and the installs big
+  enough to touch the GPU wait for the job to finish. A shared VM already running a job
+  is left alone (one GPU, one job): the newcomer rents privately and stops it as before.
+  `--no-share` on `scripts/colab_generate.py` opts out entirely. See
+  [docs/colab-gpu.md](docs/colab-gpu.md).
 - **Every studio step now runs on a rented GPU — a Mac with nothing installed is a whole
   lab.** Three gaps closed, all behind the same `colab` CLI:
   - *What a Colab Pixal3D run brings back.* The supervisor now downloads the run's record
@@ -40,6 +50,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `move_description` advanced choice. See [docs/colab-gpu.md](docs/colab-gpu.md).
 
 ### Fixed
+- **Big artifacts come back from the VM in pieces, checksummed — and one that exists but
+  will not cross the link fails the run at the fetch, named.** Found live: a hero head's
+  ~460 MB clean-up dump failed every one-piece download attempt (twenty minutes after a
+  208 MB one came back fine — the contents API's size ceiling bites downloads too), the
+  fetch skipped it silently as if the wrapper had written nothing, and the run died a
+  whole step later with the bare "input file does not exist", taking an hour of rented
+  GPU with it. Downloads now mirror the upload path — split on the VM, fetched in
+  proven-sized pieces, reassembled and md5-checked here — and a declared artifact that is
+  on the VM but unfetchable is an error naming the file, while one the wrapper never
+  wrote is still skipped quietly.
 - **A described motion now plays planted on the rig — the skate, the float and the
   shimmer come off, and only good takes survive.** The H3 actor wandered its scene, so a
   "hammering" clip crept 30 cm, bobbed 23 cm and shimmered frame to frame, and exactly

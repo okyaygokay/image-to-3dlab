@@ -305,13 +305,29 @@ def test_only_pixal3d_declares_artifacts_and_the_others_declare_none():
             assert not spec.get("artifacts"), f"{backend} declares artifacts it never wrote"
 
 
-def _fake_colab(remote_files: dict, calls: list):
-    """A `colab.run` that 'downloads' by copying preloaded bytes, and records every call."""
-    def run(argv, **_kwargs):
+def _fake_colab(remote_files: dict, calls: list, fail: set[str] = frozenset()):
+    """A `colab.run` whose VM holds `remote_files` (remote basename -> bytes, or a local
+    directory), with download probes answered honestly — size and md5 of the payload —
+    so the chunked download path checks its checksums against real numbers. Basenames
+    in `fail` exist on the VM but break the link when fetched."""
+    import hashlib
+    import re as _re
+
+    def run(argv, *, stdin=None, **_kwargs):
         calls.append(argv)
+        if argv[0] == "exec" and stdin and "getsize" in stdin:
+            remote = _re.search(r"os\.path\.exists\('([^']+)'\)", stdin).group(1)
+            payload = remote_files.get(remote.rsplit("/", 1)[-1])
+            if payload is None:
+                return "MISSING"
+            if not isinstance(payload, bytes):
+                return "MISSING"
+            return f"SIZE {len(payload)} {hashlib.md5(payload).hexdigest()}"
         if argv[0] == "download":
             remote, local = argv[1], Path(argv[2])
             payload = remote_files.get(remote.rsplit("/", 1)[-1])
+            if remote.rsplit("/", 1)[-1] in fail:
+                raise cg.colab.ColabError("connection reset by peer")
             if payload is None:
                 raise cg.colab.ColabError(f"404 {remote}")
             local.parent.mkdir(parents=True, exist_ok=True)
@@ -381,6 +397,24 @@ def test_a_backend_without_artifacts_fetches_nothing(monkeypatch, tmp_path):
     assert calls == []
 
 
+def test_an_artifact_that_exists_but_will_not_cross_the_link_fails_the_run(
+        monkeypatch, tmp_path):
+    """Found live: a head's ~460 MB clean-up dump failed every one-piece download
+    attempt, the fetch skipped it silently as if the wrapper had written none, and the
+    run died a whole hero step later with the bare 'input file does not exist'. An
+    artifact that is *on the VM* must fail the fetch here, named — and one that was
+    never written still skips quietly (the test above)."""
+    remote_files = {"x.json": json.dumps({"backend": "pixal3d"}).encode(),
+                    "x.post.bin": b"DUMP"}
+    monkeypatch.setattr(cg.colab, "run",
+                        _fake_colab(remote_files, [], fail={"x.post.bin"}))
+    local = tmp_path / "x.glb"
+    local.parent.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(cg.colab.ColabError, match="x.post.bin.*would not come back"):
+        cg.fetch_artifacts("s", "pixal3d", "/content/i2l/outputs/x.glb", local,
+                           scratch=tmp_path / "scratch")
+
+
 # --- one repo script on the VM (--exec) ------------------------------------------------------
 
 
@@ -398,16 +432,13 @@ def test_exec_mode_substitutes_the_placeholders_and_lands_the_output(monkeypatch
     monkeypatch.setattr(cg, "wait_for_remote_job", lambda *a, **k: {"state": "done"})
     monkeypatch.setattr(cg.colab, "ensure_session", lambda *a, **k: None)
     monkeypatch.setattr(cg.colab, "stop_idle_sessions", lambda **k: iter([]))
+    monkeypatch.setattr(cg.colab, "shared_session", lambda live=None: None)
     monkeypatch.setattr(cg.colab, "warm_session", lambda backend: None)
     monkeypatch.setattr(cg, "ensure_remote_setup", lambda *a, **k: None)
     monkeypatch.setattr(cg, "sync_tree", lambda *a, **k: None)
 
-    def fake_run(argv, **_kwargs):
-        if argv[0] == "download":
-            Path(argv[2]).write_bytes(b"PNG")   # the CLI writes the file it fetched
-        return ""
-
-    monkeypatch.setattr(cg.colab, "run", fake_run)
+    monkeypatch.setattr(cg.colab, "run",
+                        _fake_colab({"crop_up.png": b"PNG"}, []))
 
     crop = tmp_path / "crop.png"
     crop.write_bytes(b"crop")
@@ -453,15 +484,11 @@ def test_exec_bin_mode_skips_the_local_script_check_and_runs_the_binary_raw(
     monkeypatch.setattr(cg, "wait_for_remote_job", lambda *a, **k: {"state": "done"})
     monkeypatch.setattr(cg.colab, "ensure_session", lambda *a, **k: None)
     monkeypatch.setattr(cg.colab, "stop_idle_sessions", lambda **k: iter(()))
+    monkeypatch.setattr(cg.colab, "shared_session", lambda live=None: None)
     monkeypatch.setattr(cg, "ensure_remote_setup", lambda *a, **k: None)
     monkeypatch.setattr(cg, "sync_tree", lambda *a, **k: None)
 
-    def fake_run(argv, **_kwargs):
-        if argv[0] == "download":
-            Path(argv[2]).write_bytes(b"GLB")
-        return ""
-
-    monkeypatch.setattr(cg.colab, "run", fake_run)
+    monkeypatch.setattr(cg.colab, "run", _fake_colab({"head.glb": b"GLB"}, []))
     dump, out = tmp_path / "head.post.bin", tmp_path / "head.glb"
     dump.write_bytes(b"dump")
     rc = cg.main(["--backend", "pixal3d",
@@ -492,16 +519,19 @@ def test_exec_mode_fetches_the_helpers_side_files_and_names_the_output_dir(
     monkeypatch.setattr(cg, "wait_for_remote_job", lambda *a, **k: {"state": "done"})
     monkeypatch.setattr(cg.colab, "ensure_session", lambda *a, **k: None)
     monkeypatch.setattr(cg.colab, "stop_idle_sessions", lambda **k: iter(()))
+    monkeypatch.setattr(cg.colab, "shared_session", lambda live=None: None)
     monkeypatch.setattr(cg, "ensure_remote_setup", lambda *a, **k: None)
     monkeypatch.setattr(cg, "sync_tree", lambda *a, **k: None)
 
-    def fake_run(argv, **_kwargs):
+    shots = {name: b"PNG" for name in
+             ("head_front.png", "head_side.png", "body_front.png")}
+
+    def record_downloads(argv, **kwargs):
         if argv[0] == "download":
             downloads.append(argv)
-            Path(argv[2]).write_bytes(b"PNG")   # the CLI writes what it fetched
-        return ""
+        return _fake_colab(shots, [])(argv, **kwargs)
 
-    monkeypatch.setattr(cg.colab, "run", fake_run)
+    monkeypatch.setattr(cg.colab, "run", record_downloads)
 
     model, shot = tmp_path / "hero.glb", tmp_path / "check" / "head_front.png"
     model.write_bytes(b"GLB")
@@ -522,3 +552,145 @@ def test_exec_mode_fetches_the_helpers_side_files_and_names_the_output_dir(
 def test_generate_mode_still_requires_image_and_output(capsys):
     assert cg.main(["--backend", "hi3d", "--yes"]) == 2
     assert "image and an output GLB" in capsys.readouterr().err
+
+
+# --- the lab's shared VM -------------------------------------------------------------------
+
+
+def _generation_harness(monkeypatch, tmp_path, seen):
+    """The cloud faked out for one plain generation job; everything the sharing path
+    decides is recorded in `seen` (which session, kept or stopped, prefetched or not)."""
+
+    def fake_launch(session, backend, image, output, extra):
+        seen["launch"] = (session, backend)
+        return "/content/i2l/jobs/1"
+
+    monkeypatch.setattr(cg, "launch_remote_job", fake_launch)
+    monkeypatch.setattr(cg, "wait_for_remote_job", lambda *a, **k: {"state": "done"})
+    monkeypatch.setattr(cg.colab, "stop_idle_sessions", lambda **k: iter(()))
+    monkeypatch.setattr(cg.colab, "ensure_session", lambda config, **k: seen.setdefault(
+        "config", config))
+    monkeypatch.setattr(cg.colab, "warm_session", lambda backend: seen.setdefault(
+        "warm", backend) and None)
+    monkeypatch.setattr(cg.colab, "upload", lambda *a, **k: None)
+    monkeypatch.setattr(cg, "ensure_remote_setup", lambda *a, **k: None)
+    monkeypatch.setattr(cg, "sync_tree", lambda *a, **k: None)
+    monkeypatch.setattr(cg.colab, "run", _fake_colab({"out.glb": b"GLB"}, []))
+    image, out = tmp_path / "in.png", tmp_path / "out.glb"
+    image.write_bytes(b"PNG")
+    return image, out
+
+
+def test_a_live_shared_vm_takes_the_job_and_is_kept_and_prefetched(monkeypatch, tmp_path):
+    """The studio's default: one warm VM every backend's job lands on, kept after the
+    job (the idle window reaps it, not the job), with the other backends installing onto
+    it in the background so the next step starts in seconds."""
+    seen = {}
+    image, out = _generation_harness(monkeypatch, tmp_path, seen)
+
+    def probed(session):
+        seen["probed"] = session
+        return False
+
+    monkeypatch.setattr(cg.colab, "shared_session", lambda live=None: "i2l-lab")
+    monkeypatch.setattr(cg, "job_running_on", probed)
+    monkeypatch.setattr(cg, "start_prefetch",
+                        lambda session, mine: seen.setdefault("prefetch", (session, mine)))
+
+    assert cg.main(["--backend", "hi3d", str(image), str(out), "--yes"]) == 0
+    assert seen["launch"][0] == "i2l-lab"
+    assert seen["probed"] == "i2l-lab"                      # the busy-guard ran first
+    assert seen["config"].session == "i2l-lab"
+    assert seen["config"].stop_when_done is False           # kept for the idle window
+    assert seen["prefetch"] == ("i2l-lab", "hi3d")
+    assert "warm" not in seen                               # the shared VM supersedes it
+
+
+def test_a_busy_shared_vm_means_a_private_stopped_session(monkeypatch, tmp_path):
+    """One GPU, one job: a shared VM still running another job is left alone and this
+    one rents privately, stops when it ends, and prefetches nothing."""
+    seen = {}
+    image, out = _generation_harness(monkeypatch, tmp_path, seen)
+    monkeypatch.setattr(cg.colab, "shared_session", lambda live=None: "i2l-lab")
+    monkeypatch.setattr(cg, "job_running_on", lambda session: True)
+    monkeypatch.setattr(cg.colab, "session_name", lambda stem, backend: "prop-hi3d-aaaaaa")
+
+    def must_not_prefetch(session, mine):
+        raise AssertionError("a private, stopped session must not prefetch")
+
+    monkeypatch.setattr(cg, "start_prefetch", must_not_prefetch)
+    assert cg.main(["--backend", "hi3d", str(image), str(out), "--yes"]) == 0
+    assert seen["launch"][0] == "prop-hi3d-aaaaaa"
+    assert seen["config"].stop_when_done is True
+    assert seen["warm"] == "hi3d"                           # the fallback picker ran
+
+
+def test_no_share_ignores_the_shared_vm_entirely(monkeypatch, tmp_path):
+    """`--no-share` is the old behaviour: a private per-job VM, stopped when it ends."""
+    seen = {}
+    image, out = _generation_harness(monkeypatch, tmp_path, seen)
+
+    def must_not_share(live=None):
+        raise AssertionError("--no-share must not even ask for the shared VM")
+
+    monkeypatch.setattr(cg.colab, "shared_session", must_not_share)
+    monkeypatch.setattr(cg, "job_running_on",
+                        lambda session: (_ for _ in ()).throw(
+                            AssertionError("no busy probe without sharing")))
+    monkeypatch.setattr(cg.colab, "session_name", lambda stem, backend: "prop-hi3d-aaaaaa")
+    assert cg.main(["--backend", "hi3d", str(image), str(out), "--no-share", "--yes"]) == 0
+    assert seen["launch"][0] == "prop-hi3d-aaaaaa"
+    assert seen["config"].stop_when_done is True
+
+
+def test_the_first_job_starts_the_shared_vm_and_keeps_it(monkeypatch, tmp_path):
+    """Nothing live yet: the job creates `i2l-lab` itself — that is the only way the
+    arrangement bootstraps — and keeps it, so the next step lands warm. No busy probe:
+    a session that does not exist cannot be busy."""
+    seen = {}
+    image, out = _generation_harness(monkeypatch, tmp_path, seen)
+    monkeypatch.setattr(cg.colab, "shared_session", lambda live=None: None)
+
+    def must_not_probe(session):
+        raise AssertionError("a session that is not live must not be probed")
+
+    monkeypatch.setattr(cg, "job_running_on", must_not_probe)
+    monkeypatch.setattr(cg, "start_prefetch",
+                        lambda session, mine: seen.setdefault("prefetch", (session, mine)))
+    assert cg.main(["--backend", "hi3d", str(image), str(out), "--yes"]) == 0
+    assert seen["launch"][0] == cg.colab.SHARED_SESSION == "i2l-lab"
+    assert seen["config"].stop_when_done is False
+    assert seen["prefetch"] == ("i2l-lab", "hi3d")
+
+
+def test_the_prefetch_plan_survives_the_trip_to_the_vm(monkeypatch):
+    """The plan rides a snippet of Python across the exec channel. A double-serialized
+    plan (a JSON *string*) parses to nothing on the far side and the prefetch silently
+    skips every backend — exactly what an earlier version of this snippet did."""
+    import io
+    import subprocess as real_subprocess
+    import sys as real_sys
+
+    sent, launched, opened = {}, [], []
+
+    def fake_run(args, *, stdin=None, **_kwargs):
+        sent["stdin"] = stdin
+        return ""
+
+    monkeypatch.setattr(cg.colab, "run", fake_run)
+    monkeypatch.setattr(real_subprocess, "Popen",
+                        lambda argv, **_k: launched.append(argv))
+    monkeypatch.setattr(real_sys, "executable", "KERNEL_PY")
+    monkeypatch.setattr("builtins.open",
+                        lambda path, mode="r", *a, **k: opened.append(path)
+                        or io.StringIO())
+    cg.start_prefetch("i2l-lab", "hi3d")
+    exec(sent["stdin"], {})                           # the snippet under test
+    argv = launched[0]
+    assert argv[0] == "KERNEL_PY"
+    assert argv[1] == "/content/i2l/scripts/colab_prefetch.py"
+    assert opened == ["/content/i2l/prefetch.log"]    # the runner's stdout
+    plan = json.loads(argv[argv.index("--plan") + 1])
+    assert plan and all(len(entry) == 3 for entry in plan)
+    assert [entry[0] for entry in plan] == [backend for backend in cg.PREFETCH_ORDER
+                                           if backend != "hi3d"]

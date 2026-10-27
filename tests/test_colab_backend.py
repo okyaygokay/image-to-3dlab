@@ -340,6 +340,106 @@ def test_a_small_file_uploads_whole(monkeypatch, tmp_path):
     assert calls[0][2] == "/content/i2l/inputs/crop.png"
 
 
+def _vm_holding(files: dict, chunk: int, calls: list):
+    """A `run` fake whose VM holds `files` (remote path -> bytes): probes are answered
+    with the payload's true size and md5, downloads write the bytes (slicing parts by
+    index for the split path), and every call is recorded."""
+    import hashlib
+    import re as _re
+
+    def run(args, *, stdin=None, **_kwargs):
+        calls.append((list(args), stdin))
+        if args[0] == "exec" and stdin and "getsize" in stdin:
+            remote = _re.search(r"os\.path\.exists\('([^']+)'\)", stdin).group(1)
+            payload = files.get(remote)
+            if payload is None:
+                return "MISSING"
+            return f"SIZE {len(payload)} {hashlib.md5(payload).hexdigest()}"
+        if args[0] == "download":
+            remote, local = args[1], Path(args[2])
+            base = remote.rsplit("/", 1)[1]
+            if ".part" in base:
+                stem, index = base.rsplit(".part", 1)
+                payload = files[f"{remote.rsplit('/', 1)[0]}/{stem}"]
+                local.write_bytes(payload[int(index) * chunk:(int(index) + 1) * chunk])
+            else:
+                local.write_bytes(files[remote])
+        return ""
+    return run
+
+
+def test_a_small_file_downloads_whole_and_checked(monkeypatch, tmp_path):
+    """The probe runs even for small files: a truncated short download is a corrupt
+    replay waiting to happen, so the checksum is always compared."""
+    calls: list = []
+    payload = b"a small dump"
+    monkeypatch.setattr(cb, "run",
+                        _vm_holding({"/o/dump.bin": payload}, cb.UPLOAD_CHUNK, calls))
+    local = tmp_path / "dump.bin"
+    cb.download("s", "/o/dump.bin", local)
+    assert local.read_bytes() == payload
+    kinds = [args[0] for args, _ in calls]
+    assert kinds == ["exec", "download"]            # probe, then one plain download
+
+
+def test_a_file_over_the_apis_ceiling_comes_back_in_proven_sized_pieces(
+        monkeypatch, tmp_path):
+    """The link is the same in both directions: what uploads split under the contents
+    API's ceiling, downloads split too. Found live: a ~460 MB head dump failed all
+    three one-piece attempts twenty minutes after a 208 MB one came back fine."""
+    calls: list = []
+    chunk = 10
+    monkeypatch.setattr(cb, "UPLOAD_CHUNK", chunk)
+    payload = b"0123456789abcdefghij01234"          # 25 bytes -> three parts, the last short
+    monkeypatch.setattr(cb, "run", _vm_holding({"/o/dump.bin": payload}, chunk, calls))
+    local = tmp_path / "dump.bin"
+    cb.download("s", "/o/dump.bin", local)
+    assert local.read_bytes() == payload
+    downloads = [args for args, _ in calls if args[0] == "download"]
+    assert [Path(d[1]).name for d in downloads] == ["dump.bin.part0000",
+                                                    "dump.bin.part0001",
+                                                    "dump.bin.part0002"]
+    split = next(stdin for _, stdin in calls if stdin and "while block :=" in stdin)
+    assert "part{index:04d}" in split
+    cleanup = next(stdin for _, stdin in calls if stdin and "glob.glob" in stdin)
+    assert "os.remove" in cleanup
+
+
+def test_a_remote_file_that_is_not_there_is_missing_not_failed(monkeypatch, tmp_path):
+    """Distinct errors on purpose: a wrapper that wrote no dump must not fail a good
+    run, while a dump that exists and will not cross the link must."""
+    calls: list = []
+    monkeypatch.setattr(cb, "run", _vm_holding({}, 10, calls))
+    with pytest.raises(cb.RemoteMissing, match="not on the session"):
+        cb.download("s", "/o/none.bin", tmp_path / "none.bin")
+    assert not any(args[0] == "download" for args, _ in calls)
+
+
+def test_a_corrupted_download_is_refused_not_shipped(monkeypatch, tmp_path):
+    """A short or corrupt transfer must fail here, not land as a subtly wrong dump."""
+    calls: list = []
+
+    def lying_vm(args, *, stdin=None, **_kwargs):
+        calls.append((list(args), stdin))
+        if args[0] == "exec" and stdin and "getsize" in stdin:
+            import hashlib
+            import re as _re
+            remote = _re.search(r"os\.path\.exists\('([^']+)'\)", stdin).group(1)
+            return f"SIZE 9 {hashlib.md5(b'012345678').hexdigest()}" if remote else "MISSING"
+        if args[0] == "download":
+            Path(args[2]).write_bytes(b"01234567X")  # one byte wrong in flight
+        return ""
+    monkeypatch.setattr(cb, "run", lying_vm)
+    with pytest.raises(cb.ColabError, match="checksum mismatch"):
+        cb.download("s", "/o/dump.bin", tmp_path / "dump.bin")
+
+
+def test_a_probe_that_cannot_be_read_says_so(monkeypatch, tmp_path):
+    monkeypatch.setattr(cb, "run", lambda *a, **k: "kernel hiccup")
+    with pytest.raises(cb.ColabError, match="could not stat"):
+        cb.download("s", "/o/dump.bin", tmp_path / "dump.bin")
+
+
 def test_a_warm_session_is_reused_instead_of_paying_the_install_again(tmp_path):
     """The GUI starts a job per click. A fresh VM installs for 15-30 minutes first, so
     every click paying that is not a usable interface -- a session still inside its idle
@@ -382,3 +482,20 @@ def test_the_newest_warm_session_wins(tmp_path):
     cb.touch("new-hi3d-bbbbbb", path=path, now=now - 60)
     live = {"old-hi3d-aaaaaa", "new-hi3d-bbbbbb"}
     assert cb.warm_session("hi3d", path=path, now=now, live=live) == "new-hi3d-bbbbbb"
+
+
+def test_the_shared_session_is_offered_only_when_live():
+    """The lab's one shared VM is what makes a second click start instantly; when it is
+    not running there is nothing to offer and the supervisor rents as before."""
+    assert cb.shared_session(live={"i2l-lab", "other-1"}) == "i2l-lab"
+    assert cb.shared_session(live=set()) is None
+
+
+def test_the_shared_session_is_not_a_warm_session_of_any_backend(tmp_path):
+    """It is not named after a backend, so the per-route picker must never hand it out
+    behind the sharing flag's back (its busy-guard and prefetch only run on that path)."""
+    path = tmp_path / "colab.json"
+    now = 1_000_000.0
+    cb.touch(cb.SHARED_SESSION, path=path, now=now - 60)
+    assert cb.warm_session("hi3d", path=path, now=now,
+                          live={cb.SHARED_SESSION}) is None

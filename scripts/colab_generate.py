@@ -11,11 +11,17 @@ What it does, in order:
 
 1. Names the accelerator, the session and the idle timeout (and stops there, unless
    ``--yes``, because a rented GPU is a bill).
-2. Allocates the session, uploads the picture, and runs the backend's setup out there --
-   once per VM, guarded by a stamp, so a second job on the same session is quick.
-3. Starts the real generation detached on the VM and polls its status file. Detached, not
+2. Picks the VM: the lab's shared one (``i2l-lab``, created if none is live — the
+   default; ``--no-share`` opts out), else a warm session for this backend, else a fresh
+   private rental. The shared VM is kept after the job and the idle window reaps it, so
+   the next step starts in seconds.
+3. Uploads the picture and runs the backend's setup out there -- once per VM, guarded by a
+   stamp, so a second job on the same session is quick.
+4. Starts the real generation detached on the VM and polls its status file. Detached, not
    inline, because a refinement can take an hour and a websocket hiccup must not lose it.
-4. Downloads the GLB, then releases the session (unless ``--keep``).
+   On a session that outlives the job it also starts ``scripts/colab_prefetch.py`` detached
+   out there, installing the *other* backends one at a time while the GPU works.
+5. Downloads the GLB, then releases the session (unless ``--keep``, or it is the shared VM).
 
 The remote interpreter is not this machine's, so nothing here imports a backend's
 dependencies: the wrapper out there does. Locally this needs only the standard library and
@@ -119,6 +125,77 @@ REMOTE_PYTHON = {
 #: The stamp a setup writes when it is done, so a warm session skips 20 minutes of install.
 def setup_stamp(backend: str) -> str:
     return f"{REMOTE_ROOT}/.setup-{backend}-stamp"
+
+
+#: Rough install sizes in GB, for the prefetch's disk guard. Generous beats precise: an
+#: overestimate skips a backend (the next job installs it), an underestimate fills the
+#: disk mid-download and fails the install.
+PREFETCH_GB = {"autorig": 15, "prompt2rig": 75, "pixal3d": 12, "hi3d": 35,
+               "hunyuan_cuda": 18, "trellis_cuda": 18, "qwen_image": 12}
+#: The order the prefetch installs the *other* backends in: the Animate pair first (a
+#: described motion is what a rig wants next, and a rig what a generation wants), then
+#: Pixal3D (Finish's hero route), then the rest.
+PREFETCH_ORDER = ("autorig", "prompt2rig", "pixal3d", "hi3d", "hunyuan_cuda",
+                  "trellis_cuda", "qwen_image")
+#: A job marker older than this is a waiter that died, not a job holding the GPU.
+STALE_JOB_SECONDS = 8 * 60 * 60
+
+
+def job_running_on(session: str) -> bool:
+    """Whether one of this lab's jobs is still running on the VM (one GPU, one job).
+
+    Reads the job markers the supervisor's launcher writes. On a probe that cannot run,
+    err on busy: a wrongly private session costs minutes, a wrongly shared one costs the
+    other job its GPU.
+    """
+    code = (
+        "import glob, json, os, time\n"
+        "busy = 0\n"
+        "now = time.time()\n"
+        f"for status in glob.glob({f'{REMOTE_ROOT}/jobs/*/status.json'!r}):\n"
+        "    try:\n"
+        "        state = json.load(open(status)).get('state')\n"
+        "    except Exception:\n"
+        "        continue\n"
+        f"    if state == 'running' and now - os.path.getmtime(status) < {STALE_JOB_SECONDS}:\n"
+        "        busy += 1\n"
+        "print('BUSY', busy)\n"
+    )
+    try:
+        output = colab.run(["exec", "-s", session, "--timeout", "120"], stdin=code,
+                           timeout=180, attempts=2)
+        return "BUSY 0" not in output
+    except colab.ColabError:
+        return True
+
+
+def start_prefetch(session: str, mine: str) -> None:
+    """Install the other backends on this VM in the background while the job runs.
+
+    Only worth it on a session that outlives the job: a session stopped with its job
+    takes the installs with it. Best effort — a prefetch that cannot start just means
+    the next step installs the old way.
+    """
+    plan = [[backend, BACKENDS[backend]["setup"], PREFETCH_GB[backend]]
+            for backend in PREFETCH_ORDER if backend != mine and backend in BACKENDS]
+    # The plan rides the argv as JSON — the runner's parser only accepts lists, so a
+    # double-serialized plan (a string) would filter to nothing and skip every install.
+    plan_json = json.dumps(plan)
+    code = (
+        "import subprocess, sys\n"
+        f"argv = [sys.executable, {REMOTE_ROOT + '/scripts/colab_prefetch.py'!r},\n"
+        f"        '--plan', {plan_json!r}, '--root', {REMOTE_ROOT!r}]\n"
+        f"log = open({REMOTE_ROOT + '/prefetch.log'!r}, 'a')\n"
+        "print('--- prefetch starting ---', file=log, flush=True)\n"
+        "subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, "
+        "start_new_session=True)\n"
+    )
+    try:
+        colab.run(["exec", "-s", session, "--timeout", "60"], stdin=code, timeout=180)
+        log("prefetching the other backends onto this VM in the background: "
+            + ", ".join(backend for backend, _, _ in plan))
+    except colab.ColabError:
+        log("prefetch could not start; the next step installs as before")
 
 
 def log(message: str) -> None:
@@ -359,26 +436,32 @@ def fetch_artifacts(session: str, backend: str, remote_output: str, local_output
                 colab.run(["exec", "-s", session, "--timeout", "120"], stdin=code,
                           timeout=180, attempts=2)
                 packed = scratch / f"{stem}.svviews.tar"
-                colab.run(["download", archive, str(packed), "-s", session],
-                          timeout=600, attempts=3)
+                colab.download(session, archive, packed, timeout=600)
                 target.mkdir(parents=True, exist_ok=True)
                 with tarfile.open(packed) as tar:
                     tar.extractall(target)
                 packed.unlink(missing_ok=True)
                 brought.append(target)
-            except (colab.ColabError, tarfile.TarError, OSError):
+            except colab.RemoteMissing:
                 continue
+            except (colab.ColabError, tarfile.TarError, OSError) as exc:
+                raise colab.ColabError(
+                    f"{remote} is on the VM but would not come back ({exc}); a later "
+                    f"step needs it — retry the run rather than lose it") from exc
         else:
+            # A declared artifact that the wrapper never wrote is skipped quietly (an
+            # unpatched build must not fail a good run). One that exists but will not
+            # cross the link fails *here*, named — found live: a ~460 MB head dump
+            # failed every one-piece attempt and the run died a step later with the
+            # bare "input file does not exist".
             try:
-                # Three tries: these ride the same link the upload does, and a reset on
-                # the one file a later step needs (the clean-up dump) must not be mistaken
-                # for a wrapper that wrote nothing.
-                colab.run(["download", remote, str(target), "-s", session],
-                          timeout=600, attempts=3)
-            except colab.ColabError:
+                colab.download(session, remote, target, timeout=600)
+            except colab.RemoteMissing:
                 continue
-            if not target.is_file():
-                continue
+            except colab.ColabError as exc:
+                raise colab.ColabError(
+                    f"{remote} is on the VM but would not come back ({exc}); a later "
+                    f"step needs it — retry the run rather than lose it") from exc
             if suffix == ".json" and target.stat().st_size <= 100_000:
                 try:
                     record = json.loads(target.read_text())
@@ -453,6 +536,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--new-session", action="store_true",
                         help="Rent a fresh VM instead of reusing a warm one. Pays the "
                              "install again; use it for a clean-room run.")
+    parser.add_argument("--no-share", action="store_true",
+                        help="Do not use the lab's shared VM. A private session per job, "
+                             "stopped when it ends — the old behaviour, for when one warm "
+                             "VM holding every install is not what you want.")
     parser.add_argument("--keep", action="store_true",
                         help="Leave the VM running when the job finishes.")
     parser.add_argument("--skip-setup", action="store_true",
@@ -519,20 +606,37 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     spec = BACKENDS[args.backend]
-    # Reuse a warm VM by default. A fresh one spends 15-30 minutes installing before it can
-    # do anything, and the studio starts a job per click -- paying that every time is not a
-    # usable GUI. `--new-session` is for a clean-room run; `--session` names one explicitly.
-    session = args.session
+    # Which VM, and whether it outlives the job. The lab's shared VM — created here if
+    # no such session is live yet — is the default: every backend's install serves every
+    # job on it, and the supervisor prefetches the other backends onto it while this job
+    # runs, so the *next* step starts in seconds. It is kept after the job and the idle
+    # window reaps it. One already running another job is left alone (one GPU, one job):
+    # this one falls through to a private session, exactly as before sharing existed.
+    # `--session` implies keep, `--keep` asks for it, `--no-share` opts out of the whole
+    # arrangement.
+    session, kept = args.session, args.session is not None or args.keep
     if session is None and not args.new_session:
-        session = colab.warm_session(args.backend)
-        if session:
-            log(f"reusing the warm session {session!r} (no install needed)")
+        if not args.no_share:
+            if colab.shared_session() is None:
+                session, kept = colab.SHARED_SESSION, True
+                log(f"starting the lab's shared VM {session!r}; every backend's job lands "
+                    "on it, and it is kept for the idle window")
+            elif job_running_on(colab.SHARED_SESSION):
+                log("the lab's shared VM is busy with another job; renting a private one")
+            else:
+                session, kept = colab.SHARED_SESSION, True
+                log(f"using the lab's shared VM {session!r} "
+                    "(kept after the job; the other backends prefetch onto it)")
+        if session is None:
+            session = colab.warm_session(args.backend)
+            if session:
+                log(f"reusing the warm session {session!r} (no install needed)")
     stem = upload_source.stem if upload_source is not None else "exec"
     session = session or colab.session_name(stem, args.backend)
     config = colab.RemoteConfig(
         session=session,
         accelerator=args.accelerator,
-        stop_when_done=not args.keep and args.session is None,
+        stop_when_done=not kept,
         timeout_seconds=args.timeout,
     ).validated()
 
@@ -593,16 +697,21 @@ def main(argv: list[str] | None = None) -> int:
         else:
             workdir = launch_remote_job(session, args.backend, remote_in, remote_out, extra)
         log(f"remote job started; watching {workdir}")
+        if kept and not args.new_session:
+            start_prefetch(session, args.backend)
         status = wait_for_remote_job(session, workdir, timeout=args.timeout)
         if status.get("state") != "done":
             detail = status.get("error") or f"exit code {status.get('exit_code', '?')}"
             raise colab.ColabError(f"the remote run failed: {detail}")
 
         local_out.parent.mkdir(parents=True, exist_ok=True)
-        # Three tries: this is the finished GLB, and losing it to a reset after an hour
-        # of rented GPU is the most expensive byte in the whole route.
-        colab.run(["download", remote_out, str(local_out), "-s", session],
-                  timeout=1800, attempts=3)
+        # This is the finished model, and losing it to a reset after an hour of rented
+        # GPU is the most expensive byte in the whole route: the chunked download rides
+        # the same flaky link in proven-sized pieces and checksum-checks what lands.
+        try:
+            colab.download(session, remote_out, local_out, timeout=1800)
+        except colab.RemoteMissing:
+            pass                       # the friendly message below covers it
         if not local_out.is_file():
             raise colab.ColabError(
                 f"the VM finished but {remote_out} did not come back. The file may be "
@@ -615,8 +724,7 @@ def main(argv: list[str] | None = None) -> int:
             for name in args.exec_artifacts:
                 side = f"{Path(remote_out).parent}/{name}"
                 try:
-                    colab.run(["download", side, str(local_out.parent / name), "-s", session],
-                              timeout=600, attempts=3)
+                    colab.download(session, side, local_out.parent / name, timeout=600)
                 except colab.ColabError:
                     continue  # the helper decides what it writes; absent is not an error
             log(f"brought back the helper's side files beside {local_out.name}")
