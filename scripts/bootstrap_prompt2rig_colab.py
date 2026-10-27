@@ -389,18 +389,26 @@ def ensure_ltx2() -> None:
     actually asks for `--video-engine ltx2`."""
     if marker("ltx2").is_file() and marker("ltx2").read_text() == LTX2_BUILD:
         return
-    # Charge the disk only for what is missing: a warm rebuild (the venv's package set
-    # changed) must not be refused for lack of the 71 GB the weights already occupy —
-    # that exact refusal stopped the first live rebuild, on a VM the prefetch had
-    # stuffed full.
+    # The disk guard refuses what cannot fit, and charges only for what is missing.
+    # A *rebuild* gets no guard at all: `uv venv --clear` releases the old venv before
+    # anything installs, and every build carries the same torch stack, so the old venv
+    # funds its replacement — padding a space-neutral swap is what refused the first
+    # live rebuilds on a full VM (at 10, then 3, GB free).
     weights = marker("ltx2-weights")
     have_weights = weights.is_file() and weights.read_text() == LTX2_MS_REVISION
-    need_gb = LTX2_PACKAGE_GB if have_weights else LTX2_GB
-    free_gb = shutil.disk_usage(str(REPO)).free / 1e9
-    if free_gb < need_gb + 2:
-        raise SystemExit(
-            f"LTX-2.5 needs about {need_gb:.0f} GB and this VM has {free_gb:.0f} GB free; "
-            "skipping it (the default H3 engine needs no extra room)")
+    if not have_weights:
+        free_gb = shutil.disk_usage(str(REPO)).free / 1e9
+        if free_gb < LTX2_GB + 2:
+            raise SystemExit(
+                f"LTX-2.5 needs about {LTX2_GB:.0f} GB and this VM has {free_gb:.0f} GB "
+                "free; skipping it (the default H3 engine needs no extra room)")
+    elif not ltx2_venv_python().exists():
+        free_gb = shutil.disk_usage(str(REPO)).free / 1e9
+        if free_gb < LTX2_PACKAGE_GB + 2:
+            raise SystemExit(
+                f"the LTX-2.5 venv needs about {LTX2_PACKAGE_GB:.0f} GB and this VM "
+                f"has {free_gb:.0f} GB free; skipping it (the default H3 engine needs "
+                "no extra room)")
     require_cu128_driver()
     index = host.TORCH_INDEX + "cu128"
     LTX2_VENV.parent.mkdir(parents=True, exist_ok=True)
@@ -417,10 +425,13 @@ def ensure_ltx2() -> None:
         weights.write_text(LTX2_MS_REVISION)
     must(["uv", "venv", "--python", PYTHON_VERSION, "--seed", "--clear", str(LTX2_VENV)],
          what="creating the ltx2 venv", timeout=1200)
-    must(["uv", "pip", "install", "--python", str(ltx2_venv_python()), "--index-url", index,
+    must(["uv", "pip", "install", "--python", str(ltx2_venv_python()), "--no-cache",
+          "--index-url", index,
           f"torch=={TORCH_VERSION}", f"torchvision=={TORCHVISION_VERSION}"],
          what=f"installing torch {TORCH_VERSION} for ltx2", timeout=7200)
-    must(["uv", "pip", "install", "--python", str(ltx2_venv_python()),
+    # --no-cache on both: a wheel cache re-eats ~4 GB of a full VM's disk per rebuild
+    # (found live), and a rebuild re-downloads torch once in exchange — a minute.
+    must(["uv", "pip", "install", "--python", str(ltx2_venv_python()), "--no-cache",
           f"diffusers @ git+https://github.com/huggingface/diffusers@{DIFFUSERS_MAIN_COMMIT}",
           f"transformers=={LTX2_TRANSFORMERS}", f"accelerate=={LTX2_ACCELERATE}",
           f"av=={AV_VERSION}"],

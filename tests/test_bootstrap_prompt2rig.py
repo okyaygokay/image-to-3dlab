@@ -254,7 +254,17 @@ def test_a_warm_ltx2_rebuild_charges_only_the_venv(monkeypatch, tmp_path):
     assert any(c[:2] == ["uv", "venv"] for c in commands)
     assert bp.marker("ltx2").read_text() == bp.LTX2_BUILD
 
-    # the same 10 GB free with no weights on disk is a cold install: refused, loudly,
+    # a rebuild releases the old venv first (`uv venv --clear`), so even 3 GB free —
+    # what a half-built venv and a re-grown wheel cache left live — is enough
+    monkeypatch.setattr(bp.shutil, "disk_usage", lambda _p: SimpleNamespace(free=3e9))
+    bp.ltx2_venv_python().parent.mkdir(parents=True)
+    bp.ltx2_venv_python().write_text("#!/bin/sh\n")
+    bp.marker("ltx2").write_text("stale")
+    commands.clear()
+    bp.ensure_ltx2()
+    assert any(c[:2] == ["uv", "venv"] for c in commands)
+
+    # the same 3 GB free with no weights on disk is a cold install: refused, loudly,
     # before anything is built or fetched
     bp.marker("ltx2").unlink()
     bp.marker("ltx2-weights").unlink()
