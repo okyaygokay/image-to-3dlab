@@ -217,3 +217,90 @@ def test_an_animation_falls_back_to_the_same_rented_gpu(tmp_path, motions, monke
     command, _ = job.commands[0]
     forwarded = command[command.index("--") + 1:]
     assert forwarded[:2] == ["--preset", "walk"]
+
+
+# --- a described motion: the prompt box's job ----------------------------------------------
+
+
+def _rigged_run(tmp_path, motions):
+    run = tmp_path / "animate" / "knight__rig__20261005-120000"
+    rigged = _glb(run / "knight_rigged.glb")
+    (rigged.with_suffix(".provenance.json")).write_text(json.dumps(
+        {"rig": {"model": "knight.glb", "license": {"name": "MIT"}}}))
+    return rigged, aa.AnimateJobManager(tmp_path / "animate", motions)
+
+
+def test_a_described_motion_is_one_rented_gpu_run(tmp_path, motions, monkeypatch):
+    """One supervisor command for the whole chain — H3, GVHMR, WiLoR, retarget — because
+    the video model only exists there. The prompt, the seed and the finishing settings
+    ride the forwarded argv; the result lands in the rig's folder, slug-named."""
+    rigged, manager = _rigged_run(tmp_path, motions)
+    job = manager.create_describe(rigged, "a knight  swinging a sword", 0, 1.25, 6, 7)
+    assert len(job.commands) == 1
+    command, _cwd = job.commands[0]
+    assert str(command[2]).endswith("colab_generate.py")
+    assert command[command.index("--backend") + 1] == "prompt2rig"
+    forwarded = command[command.index("--") + 1:]
+    assert forwarded[:2] == ["--prompt", "a knight swinging a sword"]  # whitespace folded
+    assert forwarded[forwarded.index("--seed") + 1] == "7"
+    assert forwarded[forwarded.index("--speed") + 1] == "1.25"
+    assert job.result.name == "knight_a-knight-swinging-a-sword.glb"
+    assert job.result.parent.name == "knight__rig__20261005-120000"
+    assert job.expected_seconds == aa.DESCRIBE_SECONDS
+
+
+def test_the_same_prompt_twice_makes_a_second_take(tmp_path, motions):
+    rigged, manager = _rigged_run(tmp_path, motions)
+    first = manager.create_describe(rigged, "swing", 0)
+    _glb(first.result)  # the first take exists on disk
+    manager.finish(first)
+    second = manager.create_describe(rigged, "swing", 0)
+    assert second.result.name != first.result.name
+    assert second.result.stem.startswith(first.result.stem)
+
+
+def test_a_described_motion_is_validated_like_any_other_setting(tmp_path, motions):
+    rigged, manager = _rigged_run(tmp_path, motions)
+    for prompt in ("", "  ", "no", "x" * 601):
+        with pytest.raises(ValueError):
+            manager.create_describe(rigged, prompt, 0)
+    with pytest.raises(ValueError):
+        manager.create_describe(rigged, "a good prompt", 0, seconds=2)
+    with pytest.raises(ValueError):
+        manager.create_describe(rigged, "a good prompt", 0, seconds="soon")
+    with pytest.raises(ValueError):
+        manager.create_describe(rigged, "a good prompt", 31)  # arm spread out of range
+
+
+def test_a_described_motions_record_names_every_piece_of_the_chain(tmp_path, motions):
+    """Four models, four licences: H3's community licence with its regional caveat,
+    GVHMR, WiLoR and the SMPL-X body model's research terms, plus the prompt and seed."""
+    rigged, manager = _rigged_run(tmp_path, motions)
+    job = manager.create_describe(rigged, "a cartwheel to the left", 4, None, 8, 99)
+    record = job.record
+    assert record["motion"]["prompt"] == "a cartwheel to the left"
+    assert record["motion"]["seed"] == 99
+    assert record["motion"]["arm_spread_degrees"] == 4
+    assert set(record["motion"]["licenses"]) == {"video", "motion", "hands", "body_model"}
+    assert "MiniMax" in record["motion"]["licenses"]["video"]["name"]
+    assert "USA, EU, UK" in record["motion"]["licenses"]["video"]["note"]
+    assert record["rig"]["license"] == {"name": "MIT"}  # the rig's own source carries over
+
+
+def test_a_describe_seed_comes_out_of_thin_air_when_not_given(tmp_path, motions):
+    rigged, manager = _rigged_run(tmp_path, motions)
+    one = manager.create_describe(rigged, "a spin", 0)
+    manager.finish(one)
+    two = manager.create_describe(rigged, "a spin", 0)
+    assert one.record["motion"]["seed"] != two.record["motion"]["seed"]
+
+
+def test_describe_refuses_to_share_the_tab_with_a_running_job(tmp_path, motions):
+    rigged, manager = _rigged_run(tmp_path, motions)
+    job = manager.create_describe(rigged, "a spin", 0)
+    with pytest.raises(RuntimeError):
+        manager.create_describe(rigged, "another spin", 0)
+    with pytest.raises(RuntimeError):
+        manager.create_animation(rigged, "walk", 0)
+    manager.finish(job)
+    assert manager.create_describe(rigged, "another spin", 0)

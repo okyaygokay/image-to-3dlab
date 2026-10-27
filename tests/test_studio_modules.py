@@ -1112,3 +1112,37 @@ def test_submitting_the_create_sheet_runs_clean_for_every_engine():
     assert all(p["finish"] == { "faces": 32000, "hero": True } for p in out)   # Hero face, on any engine
     assert out[0]["colab"] == {"accelerator": "G4", "resolution": 1024}
     assert out[1]["colab"] is None                        # a local engine ignores the GPU settings
+
+
+@needs_node
+def test_the_animate_step_offers_a_described_move():
+    """The move picker shows the prompt box beside the chips, and posting from it goes to
+    the describe endpoint with the card's own speed and spread."""
+    knight = json.dumps(KNIGHT)
+    out = _run("steps.js", f"""
+      const asset = {knight};
+      const ctx = {{ presets: [{{id: 'dance', label: 'Dance'}}], engines: [] }};
+      const body = m.stepBody('animated', asset, ctx);
+      const box = body.includes('data-describe') && body.includes('data-k="prompt"')
+        && body.toLowerCase().includes('describe a move') && body.includes('data-preset="dance"');
+      const posts = [];
+      globalThis.fetch = (url, init) => {{ posts.push([url, JSON.parse(init.body)]); return Promise.resolve({{ ok: true, json: () => Promise.resolve({{ job_id: 'j' }}) }}); }};
+      const job = await m.startDescribe(asset, 'swinging a sword', 1.25, 8);
+      console.log(JSON.stringify([box, posts, job.kind]));""")
+    assert out[0] is True
+    assert out[1] == [["/api/animate/describe",
+                       {"model": "animate/k/k_rigged.glb", "prompt": "swinging a sword",
+                        "speed": 1.25, "arm_spread": 8}]]
+    assert out[2] == "animate"
+
+
+@needs_node
+def test_a_described_move_needs_words_first():
+    knight = json.dumps(KNIGHT)
+    out = _run("steps.js", f"""
+      const button = {{ onclick: null }};   // one node: querySelector must return the same one
+      const card = {{ querySelector: (sel) => sel === '[data-describe]' ? button : null,
+                     querySelectorAll: () => [] }};
+      m.wireStep(card, 'animated', {knight}, {{ presets: [], engines: [], onDone: () => {{}} }});
+      console.log(JSON.stringify(typeof button.onclick === 'function'));""")
+    assert out is True

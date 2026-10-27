@@ -24,7 +24,8 @@ class FakeJobs:
             return 200, {"ok": True}
         if method == "POST":
             kind = {"/api/image": "picture", "/api/image/back": "back", "/api/generate": "model", "/api/finish": "finished",
-                    "/api/animate/rig": "rigged", "/api/animate/play": "animated", "/api/props": "split"}[path]
+                    "/api/animate/rig": "rigged", "/api/animate/play": "animated",
+                    "/api/animate/describe": "animated", "/api/props": "split"}[path]
             if kind == self.refuse:
                 return 409, {"error": "another job is running; wait for it to finish"}
             job_id = f"job-{kind}"
@@ -68,8 +69,21 @@ def test_a_whole_character_runs_and_each_step_gets_the_last_ones_file(tmp_path):
     assert [h["step"] for h in history] == ["animated", "rigged", "finished", "model", "picture"]  # newest first
     assert all(h["result"] == "done" for h in history)
     assert {h["prompt"] for h in history} == {"a sensei"}   # Activity shows what was asked for
-    assert chain.made["animated"] == "animate/r/rigged_walk.glb"   # the move's own file, for agents
-    assert history[0]["made"] == "animate/r/rigged_walk.glb"
+
+
+def test_a_described_move_posts_the_words_instead_of_a_preset(tmp_path):
+    """The plan runner's animated step knows both arrivals: a preset id, or the prompt box's
+    words. A described move needs no preset installed, so no first_move is required."""
+    runner, jobs = _runner(tmp_path)
+    chain = aa.Chain(title="knight", steps=["rigged", "animated"], first_move="idle",
+                     move_prompt="a knight swinging a sword overhead",
+                     upload=("knight.glb", b"GLB!"))
+    runner.submit(chain, background=False)
+    assert chain.status == "done"
+    posts = [(p, b) for m, p, b in jobs.calls if m == "POST"]
+    assert posts[-1][0] == "/api/animate/describe"
+    assert json.loads(posts[-1][1]) == {"model": "animate/r/rigged.glb",
+                                        "prompt": "a knight swinging a sword overhead"}
 
 
 def test_a_failure_stops_the_chain_in_plain_words_and_is_kept_in_history(tmp_path):

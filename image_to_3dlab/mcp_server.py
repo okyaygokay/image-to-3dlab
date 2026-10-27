@@ -62,7 +62,8 @@ STUDIO_ONLY = {
     "api/generate": "via create / continue_asset", "api/finish": "via create / continue_asset",
     "api/props": "via create / continue_asset", "api/image": "via create / continue_asset",
     "api/image/back": "via create / continue_asset", "api/animate/rig": "via create / continue_asset",
-    "api/animate/play": "via create / continue_asset", "api/rig/rebind": "re-rigs from the Steps panel",
+    "api/animate/play": "via create / continue_asset", "api/animate/describe": "via create / continue_asset",
+    "api/rig/rebind": "re-rigs from the Steps panel",
     "api/generate/*/cancel": "via cancel_run", "api/finish/*/cancel": "via cancel_run",
     "api/props/*/cancel": "via cancel_run", "api/image/*/cancel": "via cancel_run",
     "api/animate/*/cancel": "via cancel_run", "api/rig/rebind/*/cancel": "via cancel_run",
@@ -334,6 +335,11 @@ ADVANCED: dict[str, dict[str, Any]] = {
     "arms_away": {
         "step": "animated", "type": "float", "min": 0, "max": 25, "default": 0, "unit": "degrees",
         "what": "Moves hanging arms outward so bulky characters (armour, big shoulders) don't hide hands in hips."},
+    "move_description": {
+        "step": "animated", "type": "str", "default": None,
+        "what": "Describe the move in words (3-600 characters) instead of picking a preset: a rented "
+                "Colab GPU acts it out with MiniMax H3 and lifts the motion with GVHMR and WiLoR. "
+                "Minutes, not seconds; the first run also installs the models.",},
     "keep_everything": {
         "step": "model", "type": "bool", "default": False,
         "what": "The 3D step keeps its in-between textures, meshes and caches (several GB) for inspection."},
@@ -369,6 +375,9 @@ def read_advanced(advanced: dict[str, Any] | None) -> dict[str, Any]:
         elif "choices" in spec:
             if value not in spec["choices"]:
                 raise StudioError(f"advanced {name} is one of {', '.join(map(str, spec['choices']))}.")
+        elif spec["type"] == "str":
+            if not isinstance(value, str):
+                raise StudioError(f"advanced {name} is words.")
         else:
             try:
                 value = float(value)
@@ -400,7 +409,7 @@ def options() -> dict[str, Any]:
             "finish_detail": "light (10k triangles) | game (20k, default) | more (40k) | high (50k with the surface calmed where the picture paints: cleaner faces from the side, best for realistic humans) | hero (32k body plus a sharper head built again from a close crop of the picture: characters whose face matters; takes much longer than other details; needs a Pixal3D model made from a picture) | a count 1000-200000 | "
                              "full (every triangle, for stills; not for rigging).",
             "pixel_match": "Paint the picture's real pixels onto the model in Finish. Default: on.",
-            "move": "The animation to make (list_moves).",
+            "move": "The animation to make (list_moves), or words for one via advanced move_description.",
             "stop_after / up_to": "The last step to run: picture, back, model, finished, split, rigged, animated.",
             "again": "continue_asset only: make that step again as a new version; the current one is kept.",
         },
@@ -560,14 +569,21 @@ def create(studio: Studio, *, want: str, description: str = "", image_path: str 
         steps = [s for s in steps if s != "back"]   # only Pixal3D builds from front and back
     if "model" in steps and not engine:
         raise StudioError("No 3D engine is installed yet. list_engines shows them; install_backend sets one up.")
+    described = adv.get("move_description")
+    described = " ".join(str(described).split()) if described else None
+    if described is not None and not 3 <= len(described) <= 600:
+        raise StudioError("move_description must be 3 to 600 characters.")
     if "animated" in steps:
-        moves = studio.get("api/animate/models")
-        presets = moves.get("presets", []) if moves.get("installed") else []
-        if move and move not in {p["id"] for p in presets}:
-            raise StudioError(f"No move {move!r}. list_moves shows them.")
-        move = move or first_move(presets)
-        if not move:
-            steps = stop_after(steps, "rigged")
+        if not described:
+            moves = studio.get("api/animate/models")
+            presets = moves.get("presets", []) if moves.get("installed") else []
+            if move and move not in {p["id"] for p in presets}:
+                raise StudioError(f"No move {move!r}. list_moves shows them.")
+            move = move or first_move(presets)
+            if not move:
+                steps = stop_after(steps, "rigged")
+        else:
+            move = None  # a described move needs no preset installed
     recipes = studio.get("api/recipes") if have == "idea" else None
     form = {
         "title": description.strip() or Path(image_path or model_path or "").name or "New asset",
@@ -580,6 +596,8 @@ def create(studio: Studio, *, want: str, description: str = "", image_path: str 
         form["model_seed"] = str(int.from_bytes(os.urandom(3), "big"))  # a new try each time, like Create
     if move and "animated" in steps:
         form["first_move"] = move
+    if described and "animated" in steps:
+        form["move_prompt"] = described
     if adv["keep_everything"] and "model" in steps:
         form["keep_everything"] = "1"
     if "model" in steps and (engine or "").startswith("colab-"):

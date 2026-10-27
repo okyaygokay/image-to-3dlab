@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Join a grafted head and body into one object, or render a check sheet, in a background Blender.
+"""Join a grafted head and body into one object, render a check sheet, or render one
+full-body still, in a background Blender.
 
     <bpy python> scripts/hero_blender.py join grafted.glb joined.glb
     <bpy python> scripts/hero_blender.py check model.glb out_dir [--head-share 0.13]
+    <bpy python> scripts/hero_blender.py still model.glb keyframe.png
 
 Runs with any Python that has the `bpy` module (the auto-rig's venv has one), never in the
 user's open Blender: an earlier tool wiped a day of unsaved scenes by working in the live
@@ -106,6 +108,57 @@ def check(model: Path, out_dir: Path, head_share: float) -> int:
     return 0
 
 
+def still(model: Path, output: Path, width: int = 960, height: int = 544) -> int:
+    """One full-body front render, landscape — the first-frame keyframe a video model
+    animates from. The camera is placed by lens math rather than a magic zoom, so the
+    whole figure fits with margin whatever its proportions."""
+    bpy = _fresh()
+    from mathutils import Vector
+
+    bpy.ops.import_scene.gltf(filepath=str(model))
+    scene = bpy.context.scene
+    mesh = max((o for o in scene.objects if o.type == "MESH"), key=lambda o: len(o.data.polygons))
+    points = [mesh.matrix_world @ v.co for v in mesh.data.vertices]
+    low, high = min(p.z for p in points), max(p.z for p in points)
+    figure = high - low
+    centre = Vector((sum(p.x for p in points) / len(points), sum(p.y for p in points) / len(points),
+                     (low + high) / 2))
+    scene.world = bpy.data.worlds.new("world")
+    scene.world.color = (0.45, 0.45, 0.45)          # the plain studio the motion prompt asks for
+    camera = bpy.data.objects.new("camera", bpy.data.cameras.new("camera"))
+    scene.collection.objects.link(camera)
+    scene.camera = camera
+    scene.render.resolution_x, scene.render.resolution_y = width, height
+    # The video model normalizes exactly 3 channels; Blender's default RGBA render would
+    # die in its pixel-mean step (found on a live run).
+    scene.render.image_settings.color_mode = "RGB"
+    for engine in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE", "BLENDER_WORKBENCH"):
+        try:
+            scene.render.engine = engine
+            break
+        except TypeError:
+            continue
+    # A 50mm lens over the landscape sensor: place the camera so the figure's height
+    # spans ~80% of the frame's vertical extent, whatever the figure's height is.
+    sensor_v = 36.0 * height / width
+    distance = (figure * 0.4) / (sensor_v / 2.0 / 50.0)
+    for offset, power in (((-3, -3, 4), 900), ((3, -2, 2), 400), ((0, 4, 3), 500)):
+        light = bpy.data.objects.new("light", bpy.data.lights.new("light", "AREA"))
+        scene.collection.objects.link(light)
+        light.data.energy = power * figure ** 2 / 4
+        light.data.size = 3 * figure
+        light.location = centre + Vector(offset) * figure
+        light.rotation_euler = (centre - light.location).to_track_quat("-Z", "Y").to_euler()
+    # In a factory-empty Blender an imported glTF faces -Y, so the front is -Y too.
+    camera.location = centre + Vector((0, -distance, 0))
+    camera.rotation_euler = (centre - camera.location).to_track_quat("-Z", "Y").to_euler()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    scene.render.filepath = str(output)
+    bpy.ops.render.render(write_still=True)
+    print(f"[hero-blender] rendered keyframe -> {output}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -116,9 +169,16 @@ def main() -> int:
     checking.add_argument("model", type=Path)
     checking.add_argument("out_dir", type=Path)
     checking.add_argument("--head-share", type=float, default=0.13)
+    stilling = sub.add_parser("still")
+    stilling.add_argument("model", type=Path)
+    stilling.add_argument("output", type=Path)
+    stilling.add_argument("--width", type=int, default=960)
+    stilling.add_argument("--height", type=int, default=544)
     args = parser.parse_args(sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else None)
     if args.command == "join":
         return join(args.source, args.output)
+    if args.command == "still":
+        return still(args.model, args.output, args.width, args.height)
     return check(args.model, args.out_dir, args.head_share)
 
 

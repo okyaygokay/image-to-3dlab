@@ -122,15 +122,23 @@ function finishDetail() {
 }
 
 function movePicker(asset, ctx, cta) {
-  const presets = ctx.presets.filter((p) => !p.take);
-  if (!presets.length) return '<p class="hint">No preset moves are installed.</p>';
   const have = new Set(asset.clips.map((c) => c.name));
-  return `<div class="moves" role="group" aria-label="Moves">${presets.map((p, i) => `<button class="chip" data-preset="${esc(p.id)}" aria-pressed="${i === 0}" ${have.has(p.id) ? 'data-tip="Already made: making it again replaces it"' : ''}>${esc(p.label)}${have.has(p.id) ? ' ✓' : ''}</button>`).join('')}</div>
+  const chips = ctx.presets.filter((p) => !p.take);
+  const moves = chips.length
+    ? `<div class="moves" role="group" aria-label="Moves">${chips.map((p, i) => `<button class="chip" data-preset="${esc(p.id)}" aria-pressed="${i === 0}" ${have.has(p.id) ? 'data-tip="Already made: making it again replaces it"' : ''}>${esc(p.label)}${have.has(p.id) ? ' ✓' : ''}</button>`).join('')}</div>`
+    : '';
+  const run = chips.length ? `<button class="primary" data-run="animated">${cta}</button>` : '';
+  return `${moves}
+    <div class="describe" data-tip="A rented GPU acts the description out (MiniMax H3), lifts the 3D motion — fingers included (GVHMR + WiLoR) — and plays it on this rig. Minutes, not seconds; the very first run also installs the models.">
+      <input class="field" type="text" data-k="prompt" maxlength="600" enterkeyhint="go"
+             placeholder="…or describe a move — “swinging a sword”, “cartwheel to the left”">
+      <button class="ghost" data-describe>Make it</button>
+    </div>
     <details class="adv"><summary>Advanced</summary>
       <label class="field">Speed <output data-o="speed">1.00×</output><input type="range" data-k="speed" min="0.5" max="2" step="0.05" value="1"></label>
       <label class="field" data-tip="Bulky characters (armour, big shoulders) can hide their hands in their hips. This moves hanging arms outward a little; raised arms are left alone.">Arms away from body <output data-o="spread">0°</output><input type="range" data-k="spread" min="0" max="25" step="1" value="0"></label>
     </details>
-    <button class="primary" data-run="animated">${cta}</button>`;
+    ${run}`;
 }
 
 /** Wire a step card's controls. `ctx.onDone(asset)` reloads the Library afterwards. */
@@ -172,6 +180,18 @@ export function wireStep(card, stepId, asset, ctx) {
       ? 'Rigging anyway. Preset moves only fit humanoids, so this one can be downloaded and animated in Blender. The rig may be wonky.' : '';
     await runInCard(card, run, ctx, stepId, note);
   });
+
+  // A described move is its own button: it starts its own job and needs no chip picked.
+  const describe = card.querySelector('[data-describe]');
+  if (describe) describe.onclick = async () => {
+    const field = k('prompt');
+    const prompt = (field?.value || '').trim();
+    if (!prompt) { field?.focus(); return; }
+    const run = () => startDescribe(asset, prompt, Number(speed?.value || 1), Number(spread?.value || 0));
+    await runInCard(card, run, ctx, 'animated',
+      'Describing a motion runs on a rented GPU: the first time also installs MiniMax H3 '
+      + 'and can take half an hour; later takes run in minutes.');
+  };
 }
 
 /** The step as a one-step chain from the asset's own files, or null when it cannot be one.
@@ -236,9 +256,13 @@ async function startRig(asset, source = 'finished') {
   return { kind: 'animate', start: await postStart('/api/animate/rig', form) };
 }
 
-async function startAnimate(asset, preset, speed, arm_spread) {
+export async function startAnimate(asset, preset, speed, arm_spread) {
   if (!preset) throw new Error('Pick a move first.');
   return { kind: 'animate', start: await postStart('/api/animate/play', JSON.stringify({ model: asset.rigged, preset, speed, arm_spread })) };
+}
+
+export async function startDescribe(asset, prompt, speed, arm_spread) {
+  return { kind: 'animate', start: await postStart('/api/animate/describe', JSON.stringify({ model: asset.rigged, prompt, speed, arm_spread })) };
 }
 
 const settingsOf = (card) => card.dataset.lastPreset || null;

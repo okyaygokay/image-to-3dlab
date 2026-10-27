@@ -100,6 +100,33 @@ to this route instead of refusing:
   rig runs as one supervisor job (`--backend autorig`), and the preset clips the same way.
   The commands are the local route's own, built by `scripts/autorig_colab.py` on the VM.
 
+### A motion from a description
+
+The Animate tab's prompt box ("…or describe a move") has no local engine at all: the video
+model that acts the prompt out only exists on the rented GPU. One supervisor job
+(`--backend prompt2rig`, `scripts/prompt2rig_colab.py` on the VM) runs the whole chain:
+
+1. **MiniMax H3** (`fl2va`, int8) acts the description out — one person, full body, static
+   camera, ~6 s at 960×544, anchored on a full-body still of your own rig rendered on the
+   VM. The checkpoint is ~124 GB in bf16, more than a Colab disk
+   holds comfortably, so the bootstrap downloads each big component alone, quantizes it to
+   int8 with the torchao recipe from the model card, saves that and deletes the raw copy:
+   peak disk stays near 100 GB, and a warm session loads the int8 weights straight back.
+2. **GVHMR** lifts SMPL-X motion from the clip (its `static_camera` fast path — a generated
+   clip never moves the camera).
+3. **WiLoR** tracks both hands — MANO ships with the WiLoR authors' own weights, so
+   nothing is registration-gated — with MediaPipe as the fallback, and the keypoints ride
+   along as wrist-relative world tracks.
+4. `scripts/pack_smplx_clip.py` packs the motion into the clip format `kimodo_retarget.py`
+   plays — the same format the preset moves ship in — and the preset path's own retarget
+   command plays it on the rig (the SkinTokens venv is installed on the VM too).
+
+The clip and the packed motion come home beside the animated GLB (`<name>.clip.mp4`,
+`<name>.motion.npz`), so a run keeps its evidence and the motion replays on any other rig.
+The first run on a cold VM pays the install (~30–45 minutes, most of it the H3 download);
+a warm session runs the whole chain in minutes. Everything is pinned: the H3, SMPL-X and
+WiLoR revisions are commits with checksums, `gvhmr` and `diffusers` are versions.
+
 ### What comes back with a Colab Pixal3D model
 
 A local Pixal3D run writes more than the GLB, and Finish needs exactly those files, so the
@@ -182,7 +209,10 @@ Renting a GPU changes where the code runs, not what you owe.
 - The backend's own licence still applies to the weights and the output. Hi3D's
   `commercial-conditional` terms, Hunyuan's territorial restriction, TRELLIS's DINOv3
   encoder — all unchanged. See [hi3d.md](hi3d.md) and the Licensing section of the
-  README.
+  README. The prompt-to-motion chain adds: MiniMax H3's Community License (commercial use
+  under $20M revenue with attribution; companies in the USA, EU, UK or South Korea must
+  apply), and research-only terms for GVHMR, WiLoR and the SMPL-X body model — the
+  viewer writes all four into every prompt-made animation's provenance record.
 - The VM is someone else's disk. Nothing from this machine is uploaded except the picture,
   this package and the scripts; `output/`, `characters/` and `vendor/` stay here. The VM is
   discarded when the session stops, and any weights downloaded onto it go with it.

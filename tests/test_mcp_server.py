@@ -418,6 +418,19 @@ def test_no_finish_choice_leaves_finish_on_its_defaults(studio):
     assert "finish_settings" not in sent(studio)
 
 
+def test_a_described_move_travels_with_the_plan_instead_of_a_preset(studio):
+    """move_description is the prompt box's MCP twin: no preset needs to be installed, the
+    plan carries the words, and the runner posts them to the describe endpoint."""
+    ms.create(studio, want="character", description="a knight",
+              advanced={"move_description": "swinging a sword overhead"})
+    form = sent(studio)
+    assert form["move_prompt"] == "swinging a sword overhead"
+    assert "first_move" not in form
+    with pytest.raises(ms.StudioError, match="3 to 600"):
+        ms.create(studio, want="character", description="a knight",
+                  advanced={"move_description": "no"})
+
+
 def test_full_detail_is_never_rigged(studio):
     with pytest.raises(ms.StudioError, match="not rigging"):
         ms.create(studio, want="character", description="a knight", finish_detail="full")
@@ -476,7 +489,7 @@ def test_list_assets_rows_say_their_family_and_version(studio):
 def test_options_lists_the_main_and_every_advanced_knob():
     out = ms.options()
     assert set(out["advanced"]) == {"edge_fade", "nudge", "texture_size", "rig_from", "speed", "arms_away",
-                                    "keep_everything", "accelerator", "resolution"}
+                                    "keep_everything", "accelerator", "resolution", "move_description"}
     assert all("what" in spec and "default" in spec and "step" in spec for spec in out["advanced"].values())
     assert {"finish_detail", "pixel_match", "move"} <= set(out["main"])
 
@@ -489,7 +502,7 @@ def test_every_studio_control_has_an_mcp_twin():
             "frontback": "front_and_back", "recipe": "add_wording", "move": "move", "text": "description",
             "edgefade": "edge_fade", "nudge": "nudge", "texture": "texture_size", "rigsource": "rig_from",
             "speed": "speed", "spread": "arms_away", "keep": "keep_everything",
-            "accelerator": "accelerator", "resolution": "resolution"}
+            "accelerator": "accelerator", "resolution": "resolution", "prompt": "move_description"}
     missing = sorted(controls - set(twin))
     assert not missing, f"Studio controls with no MCP twin: {missing}. Add them to ADVANCED (or main) and here."
     known = set(ms.ADVANCED) | set(ms.options()["main"]) | {"description"}

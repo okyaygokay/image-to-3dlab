@@ -24,6 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     pinned stable-diffusion.cpp commit with CUDA — upstream ships no Linux CUDA build).
   - *The Animate tab* rigs and plays presets through SkinTokens on a rented GPU when the
     local rigger is missing (`autorig_colab.py`), with the same job shape and records.
+- **A motion from a description** (the Animate tab's prompt box). One supervisor run on a
+  rented Colab GPU acts the description out with **MiniMax H3** (the open weights, int8,
+  first-frame + text `fl2va` workflow), lifts SMPL-X body motion with **GVHMR**, tracks
+  both hands' fingers with **WiLoR** (MediaPipe fallback), packs it all into the clip
+  format the preset moves already use (`pack_smplx_clip.py`), and plays it on the rig with
+  the preset path's own retarget command. There is no local route: the video model only
+  exists on the VM. The clip and the packed motion come home beside the animated GLB, so a
+  run keeps its evidence and the motion replays on any other rig. All weights are pinned
+  (revisions with checksums, or PyPI versions) and every model's licence — H3's Community
+  License with its regional caveat, GVHMR/WiLoR/SMPL-X research terms — lands in the
+  animation's provenance record. The first run on a cold VM pays the install (~30–45 min,
+  mostly the ~62 GB H3 components downloaded and quantized one at a time); warm sessions
+  run the chain in minutes. Agents reach the same thing through `create`'s new
+  `move_description` advanced choice. See [docs/colab-gpu.md](docs/colab-gpu.md).
 
 ### Fixed
 - **Finish's retopology accepts a model with no texture.** Hi3D emits geometry plus a flat

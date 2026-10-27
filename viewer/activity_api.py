@@ -95,6 +95,7 @@ class Chain:
     prompt: str | None = None
     engine: str | None = None
     first_move: str | None = None
+    move_prompt: str | None = None                                     # a described move instead of a preset
     picture_settings: dict[str, Any] = field(default_factory=dict)  # size, steps, seed (the image job checks them)
     model_seed: int | None = None                                    # a fresh 3D try each time; None = engine default
     keep_everything: bool = False                                    # the 3D step keeps its textures, meshes, caches
@@ -127,7 +128,8 @@ class Chain:
             "id": self.id, "title": self.title, "want": self.want, "steps": self.steps, "status": self.status,
             "current": self.current, "done": self.done, "percent": self.percent, "message": self.message,
             "log": self.log, "full_log": self.full_log[-4000:], "error": self.error,
-            "made": {k: v for k, v in self.made.items() if v}, "first_move": self.first_move, "note": self.note,
+            "made": {k: v for k, v in self.made.items() if v}, "first_move": self.first_move,
+            "move_prompt": self.move_prompt, "note": self.note,
             "step_seconds": dict(self.step_seconds),
             "elapsed": round(now - self.started, 1), "step_elapsed": round(now - self.step_started, 1),
             "stalled": self.status == "running" and now - self.last_change > STALL_SECONDS,
@@ -329,8 +331,14 @@ class ChainRunner:
                 raise ValueError("Rig needs a 3D model, and there is none yet")
             return kind, self._post("/api/animate/rig", body, ctype)
         if step == "animated":
-            if not chain.made.get("rigged") or not chain.first_move:
+            if not chain.made.get("rigged"):
                 raise ValueError("Animate needs a rigged model and a move")
+            if chain.move_prompt:  # a described move: no preset involved, the GPU acts it out
+                body = json.dumps({"model": chain.made["rigged"], "prompt": chain.move_prompt,
+                                   **chain.move_settings}).encode()
+                return kind, self._post("/api/animate/describe", body, "application/json")
+            if not chain.first_move:
+                raise ValueError("Animate needs a move (pick a preset or describe one)")
             body = json.dumps({"model": chain.made["rigged"], "preset": chain.first_move,
                                **chain.move_settings}).encode()
             return kind, self._post("/api/animate/play", body, "application/json")
@@ -448,6 +456,7 @@ def chain_from_form(form: dict[str, dict[str, Any]]) -> Chain:
     return Chain(
         title=text("title") or "Untitled", steps=[str(s) for s in steps], want=text("want") or "character",
         prompt=text("prompt"), engine=text("engine"), first_move=text("first_move"),
+        move_prompt=text("move_prompt") or None,
         picture_settings={k: picture[k] for k in ("width", "height", "steps", "seed") if k in picture}
         if isinstance(picture, dict) else {},
         model_seed=int(text("model_seed")) if (text("model_seed") or "").isdigit() else None,

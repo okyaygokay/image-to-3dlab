@@ -3034,6 +3034,9 @@ class Handler(SimpleHTTPRequestHandler):
         if parts == ["api", "animate", "play"]:
             self._create_animate_play()
             return
+        if parts == ["api", "animate", "describe"]:
+            self._create_animate_describe()
+            return
         if len(parts) == 4 and parts[:2] == ["api", "animate"] and parts[3] == "cancel":
             job = ANIMATE_JOBS.get(parts[2])
             if job is None:
@@ -3943,6 +3946,44 @@ class Handler(SimpleHTTPRequestHandler):
                 rigged = resolve_animate_model(str(body.get("model", "")), OUTPUT_ROOT)
                 job = ANIMATE_JOBS.create_animation(rigged, str(body.get("preset", "")),
                                                     body.get("arm_spread", 0), body.get("speed"))
+            except ValueError as exc:
+                self._send_json(422, {"error": str(exc)})
+                return
+            except RuntimeError as exc:
+                self._send_json(409, {"error": str(exc)})
+                return
+            self._start_animate(job)
+        except Exception as exc:
+            self._send_json(500, {"error": str(exc)})
+
+    def _create_animate_describe(self) -> None:
+        """Play a described motion on a rigged model: JSON {model, prompt, arm_spread,
+        speed, seconds}. There is no local route — the video model lives on Colab — so
+        this checks the sign-in, not the install."""
+        try:
+            waiting = busy_reason("animate")
+            if waiting:
+                self._send_json(409, {"error": waiting})
+                return
+            if not autorig_colab_ready():
+                self._send_json(409, {
+                    "error": "Describing a motion runs MiniMax H3 on a rented GPU. "
+                             "Sign in to Colab (colab sessions) first."})
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                body = json.loads(self.rfile.read(length)) if 0 < length <= 8192 else None
+            except json.JSONDecodeError:
+                body = None
+            if not isinstance(body, dict):
+                self._send_json(422, {"error": "expected a JSON object"})
+                return
+            try:
+                rigged = resolve_animate_model(str(body.get("model", "")), OUTPUT_ROOT)
+                job = ANIMATE_JOBS.create_describe(rigged, str(body.get("prompt", "")),
+                                                    body.get("arm_spread", 0),
+                                                    body.get("speed"),
+                                                    body.get("seconds"))
             except ValueError as exc:
                 self._send_json(422, {"error": str(exc)})
                 return

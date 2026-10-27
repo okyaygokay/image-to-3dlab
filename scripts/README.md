@@ -52,7 +52,7 @@ game-ready LODs), start with [the prop sheet guide](../docs/prop-sheets.md).
 | `bootstrap_qwen_image_colab.py` | Install Qwen-Image on a rented Colab VM: a CUDA sd-cli build, then its weights. |
 | `pixal3d_generate.py` | End-to-end Pixal3D generation: image -> textured GLB, on a Mac, NVIDIA or AMD. |
 | `hero_route.py` | Build a hero character: a full-body model with a high-detail head grafted on, as one GLB. |
-| `hero_blender.py` | Join a grafted head and body into one object, or render a check sheet, in a background Blender. |
+| `hero_blender.py` | Join a grafted head and body into one object, render a check sheet, or render one full-body still, in a background Blender. |
 | `upscale_esrgan.py` | Upscale a picture 4x with Real-ESRGAN, then resize it to a square of SIZE pixels. |
 | `make_back_view.py` | Draw the back of a subject from its front picture, for a front + back 3D build. |
 | `trellis_space_generate.py` | Full image -> GLB generation through the CLEAN `trellis-space-mac` port on Apple Silicon. |
@@ -205,7 +205,11 @@ The `*_pose.py` files are pure curve maths with no `bpy`, which is why they have
 | `bootstrap_autorig.py` | Install the auto-rigger: SkinTokens (VAST-AI, MIT), which gives a humanoid mesh a skeleton and skin weights. |
 | `bootstrap_autorig_colab.py` | Install the auto-rigger on a rented Colab VM: SkinTokens, its venv and its checkpoints. |
 | `autorig_colab.py` | Rig a humanoid mesh, or play a preset on one, with SkinTokens on the VM. |
+| `bootstrap_prompt2rig_colab.py` | Install the prompt-to-motion backend on a rented Colab VM: H3, GVHMR, WiLoR. |
+| `prompt2rig_colab.py` | Turn a motion description into an animated model, on a rented Colab VM. |
+| `prompt2rig_hands.py` | Hand and finger tracking for the prompt-to-motion route: a clip → per-hand keypoints. |
 | `pack_kimodo_clip.py` | Shrink a Kimodo motion clip to what `kimodo_retarget.py` reads, about 12x smaller. |
+| `pack_smplx_clip.py` | Pack GVHMR's SMPL-X motion into the clip format `kimodo_retarget.py` plays. |
 | `clean_skin_weights.py` | Drop skin weights that come from bones far away in the skeleton, then rebalance. |
 | `kimodo_retarget.py` | Play a Kimodo text-to-motion clip on a SkinTokens-rigged humanoid and export an animated GLB. |
 | `rig_check.py` | Say whether a rigged GLB fits the preset moves (a humanoid), read without Blender. |

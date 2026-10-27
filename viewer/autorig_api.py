@@ -8,6 +8,15 @@ Two jobs, both short and both subprocesses so a crash never takes the viewer dow
   writes an animated GLB. About ten seconds, CPU only. It runs in SkinTokens' venv,
   which already carries Blender's `bpy`.
 
+The preset clips are pre-made with Kimodo and shipped in `image_to_3dlab/motions/`. Users
+never run Kimodo: no Llama download, no 24 GB text encoder.
+
+* **describe**: the same retargeting, fed by a motion made from a description. One
+  supervisor run on a rented Colab GPU acts the prompt out with MiniMax H3, lifts SMPL-X
+  motion with GVHMR, tracks the fingers with WiLoR and retargets — all of it there,
+  because the video model only exists there. The clip and the packed motion come home
+  beside the GLB as evidence and for replay on other rigs.
+
 Each rigged model gets one folder, so its animations sit beside it:
 
     output/animate/<name>__rig__<stamp>/
@@ -57,6 +66,10 @@ TERMINAL = {"done", "error", "cancelled"}
 # progress bar's estimate, which says "about" for that reason.
 RIG_SECONDS = 70.0
 ANIMATE_SECONDS = 12.0
+# A prompt-made animation, on a rented GPU: the first run pays the install (~35 min on a
+# G4); a warm session runs the whole chain in 4–8 min. The estimate splits the difference
+# enough that the bar keeps moving without lying about either.
+DESCRIBE_SECONDS = 18 * 60.0
 MAX_ARM_SPREAD = 30.0
 SPEED_RANGE = (0.5, 2.0)
 
@@ -71,6 +84,33 @@ KIMODO_LICENSE = {
            "nvidia-open-model-license/",
     "model": "nvidia/Kimodo-SOMA-RP-v1.1",
     "note": "Clip pre-generated with Kimodo. NVIDIA claims no ownership of outputs.",
+}
+# The prompt-to-motion route's pieces, each named where the motion's provenance lands:
+# research-only licences except H3's community licence, which excludes US/EU/UK/KR
+# without an application — both caveats belong on the record, not in a footnote.
+PROMPT2RIG_LICENSES = {
+    "video": {
+        "name": "MiniMax H3 Community License Agreement",
+        "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE",
+        "model": "MiniMaxAI/MiniMax-H3 (int8)",
+        "note": "Commercial use under $20M revenue with attribution; companies in the "
+                "USA, EU, UK or South Korea must apply for a licence.",
+    },
+    "motion": {
+        "name": "GVHMR — research / non-commercial",
+        "url": "https://github.com/zju3dv/GVHMR#license",
+        "model": "GVHMR (SIGGRAPH Asia 2024) via the gvhmr package, v1.6.1",
+    },
+    "hands": {
+        "name": "WiLoR — research / non-commercial",
+        "url": "https://github.com/rolpotamias/WiLoR",
+        "model": "WiLoR-mini (MediaPipe fallback, Apache-2.0)",
+    },
+    "body_model": {
+        "name": "SMPL-X — research / non-commercial",
+        "url": "https://smpl-x.is.tue.mpg.de/",
+        "model": "SMPL-X neutral, from a public Hugging Face mirror",
+    },
 }
 
 
@@ -201,6 +241,20 @@ def animation_record(rig: dict[str, Any] | None, preset: dict[str, Any],
     return record
 
 
+def describe_record(rig: dict[str, Any] | None, prompt: str, arm_spread: float,
+                    seed: int) -> dict[str, Any]:
+    """Provenance for a prompt-made animation: four models' licences, one record."""
+    record = dict(rig or {})
+    record.update({
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "tool": "viewer Animate tab: scripts/prompt2rig_colab.py on a rented Colab GPU",
+        "motion": {"prompt": prompt, "made_with": "MiniMax H3 → GVHMR → WiLoR",
+                   "licenses": PROMPT2RIG_LICENSES, "seed": seed,
+                   "arm_spread_degrees": arm_spread},
+    })
+    return record
+
+
 # ----------------------------------------------------------------------------- jobs
 
 
@@ -243,6 +297,18 @@ def remote_animate_commands(rigged: Path, preset_id: str, result: Path,
               "--speed", str(pace)], REPO)]
 
 
+def describe_command(rigged: Path, result: Path, prompt: str, spread: float,
+                     pace: float, seconds: float, seed: int) -> list[str]:
+    """A described motion, on a rented GPU: one supervisor run that acts the prompt out
+    (H3), lifts the motion (GVHMR + WiLoR) and retargets it — the whole chain lives
+    there, because the video model only exists there."""
+    supervisor = REPO / "scripts" / "colab_generate.py"
+    return [sys.executable, "-u", str(supervisor), str(rigged), str(result),
+            "--backend", "prompt2rig", "--yes", "--",
+            "--prompt", prompt, "--arm-spread", f"{spread:g}", "--speed", f"{pace:g}",
+            "--seconds", f"{seconds:g}", "--seed", str(seed)]
+
+
 def animate_command(rigged: Path, motion: Path, result: Path, arm_spread: float,
                     speed: float = 1.0) -> list[str]:
     return [str(venv_python()), str(RETARGET), "--rig", str(rigged), "--motion", str(motion),
@@ -283,7 +349,7 @@ def _slug(value: str) -> str:
 class AnimateJob:
     def __init__(self, job_id: str, kind: str, directory: Path, result: Path,
                  commands: list[tuple[list[str], Path]], expected_seconds: float,
-                 record: dict[str, Any]):
+                 record: dict[str, Any], phase_message: str | None = None):
         self.id = job_id
         self.kind = kind
         self.directory = directory
@@ -291,6 +357,7 @@ class AnimateJob:
         self.commands = commands  # run in order, each as (argv, working directory)
         self.expected_seconds = expected_seconds
         self.record = record
+        self.phase_message = phase_message  # None → the kind's usual words
         self.status = "queued"
         self.started = time.monotonic()
         self.events: list[dict[str, Any]] = []
@@ -391,6 +458,46 @@ class AnimateJobManager:
                              ANIMATE_SECONDS, record)
             return self._claim(job)
 
+    def create_describe(self, rigged: Path, prompt: str, arm_spread: Any,
+                        speed: Any = None, seconds: Any = None,
+                        seed: int | None = None) -> AnimateJob:
+        """An acted-out description instead of a preset clip. There is no local route —
+        the video model is a rented-GPU affair — so Colab is a requirement, not a fallback."""
+        with self.lock:
+            if self.busy():
+                raise RuntimeError("an Animate job is already running")
+            run = rig_run_of(rigged)
+            if run is None:
+                raise ValueError("pick a rigged model first")
+            prompt = " ".join(str(prompt).split())
+            if not 3 <= len(prompt) <= 600:
+                raise ValueError("describe the motion in 3 to 600 characters")
+            spread = clamp_spread(arm_spread)
+            pace = clamp_speed(speed, {"id": "prompt", "speed": 1.0})
+            try:
+                duration = 5.0 if seconds in (None, "") else float(seconds)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("seconds must be a number") from exc
+            if not 4 <= duration <= 15:
+                raise ValueError("seconds must be between 4 and 15")
+            seed = seed if seed is not None else int(uuid.uuid4().hex[:8], 16)
+            stem = rigged.name.removesuffix("_rigged.glb")
+            slug = re.sub(r"[^a-z0-9]+", "-", prompt.lower()).strip("-")[:48] or "move"
+            result = run / f"{stem}_{slug}.glb"
+            suffix = 2
+            while result.exists():  # the same prompt twice makes a second take
+                result = run / f"{stem}_{slug}-{suffix}.glb"
+                suffix += 1
+            job = AnimateJob(
+                uuid.uuid4().hex, "animate", run, result,
+                [(describe_command(rigged, result, prompt, spread, pace, duration, seed),
+                  REPO)],
+                DESCRIBE_SECONDS,
+                describe_record(_read_json(rigged.with_suffix(".provenance.json")),
+                                prompt, spread, seed),
+                phase_message="Acting the prompt out on a rented GPU (H3 → GVHMR → retarget)")
+            return self._claim(job)
+
     def get(self, job_id: str) -> AnimateJob | None:
         return self.jobs.get(job_id) if JOB_ID.fullmatch(job_id) else None
 
@@ -404,10 +511,12 @@ ANIMATE_JOBS = AnimateJobManager()
 
 
 def _tick(job: AnimateJob, stop: threading.Event) -> None:
+    message = job.phase_message or ("Fitting a skeleton" if job.kind == "rig"
+                                    else "Playing the clip")
     while not stop.wait(2.0):
         elapsed = time.monotonic() - job.started
         job.emit({"phase": "running", "overall_pct": estimated_pct(elapsed, job.expected_seconds),
-                  "message": "Fitting a skeleton" if job.kind == "rig" else "Playing the clip"})
+                  "message": message})
 
 
 def rig_fit(glb: Path) -> dict[str, Any]:

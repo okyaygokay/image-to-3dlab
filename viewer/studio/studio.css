@@ -193,6 +193,10 @@ input[type="range"] { accent-color: var(--ember); }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .row.end { justify-content: flex-end; }
 .moves { display: flex; flex-wrap: wrap; gap: 6px; }
+.describe { display: flex; gap: 6px; margin-top: 8px; }
+.describe input { flex: 1; min-width: 0; }
+.describe button { white-space: nowrap; }
+body.busy .step .body [data-describe] { opacity: .5; pointer-events: none; }
 .step .body .primary { width: 100%; }
 .job { display: grid; gap: 8px; }
 .job .job-msg { margin: 0; color: var(--bone); font-size: 13px; }
