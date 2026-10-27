@@ -40,6 +40,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `move_description` advanced choice. See [docs/colab-gpu.md](docs/colab-gpu.md).
 
 ### Fixed
+- **Hero face over a body that paints nothing builds that body from the picture.** Hi3D
+  ships geometry only, so a Hero run over its mesh finished onto the flat grey the bake
+  falls back to, under the sharp new head — the body read as unfinished ("only the head
+  was fixed"). The route now spots a bare body (no image, no base-colour map, no vertex
+  colours, no saved cameras) and builds it from the picture first — which paints all
+  round and brings its cameras for Pixel Match — then the head, in exactly the order the
+  guide promises.
+- **A click on a dimmed step button is answered, not swallowed.** While any job runs, the
+  other steps' buttons dimmed and ignored clicks outright (`pointer-events: none`), which
+  read as "the Animate button does nothing". The dim stays as a hint; the click now
+  reaches the server, which answers "another job is running" in plain words.
 - **Fix a spot closes a hole it lands on.** A fill whose brush met a hole already in the
   mesh — a Hero face's dark pupil, the very case the guide sends the brush to — merged its
   rim with the hole's old vertices into one loop, and the "only openings this cut made"

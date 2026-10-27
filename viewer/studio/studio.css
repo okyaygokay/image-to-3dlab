@@ -196,7 +196,10 @@ input[type="range"] { accent-color: var(--ember); }
 .describe { display: flex; gap: 6px; margin-top: 8px; }
 .describe input { flex: 1; min-width: 0; }
 .describe button { white-space: nowrap; }
-body.busy .step .body [data-describe] { opacity: .5; pointer-events: none; }
+/* While a job runs, the other step buttons dim (a hint, not a lock): a click still
+   reaches the server, which answers "another job is running" in plain words. Silencing
+   the click here instead read as "the button does nothing" (2026-10-27, Animate rig). */
+body.busy .step .body [data-describe] { opacity: .5; }
 .step .body .primary { width: 100%; }
 .job { display: grid; gap: 8px; }
 .job .job-msg { margin: 0; color: var(--bone); font-size: 13px; }
@@ -208,7 +211,7 @@ body.busy .step .body [data-describe] { opacity: .5; pointer-events: none; }
 .log { margin: 0; max-height: 110px; overflow: auto; padding: 8px 10px; border-radius: 8px; background: #0a0807; border: 1px solid var(--line); font: 400 11px/1.55 var(--f-num); color: #c9b9ad; white-space: pre-wrap; }
 .step.stalled { border-color: #f2c14e; }
 .stallnote { margin: 0; font-size: 12.5px; color: #f6dfa4; }
-body.busy .step .body [data-run] { opacity: .5; pointer-events: none; }
+body.busy .step .body [data-run] { opacity: .5; }
 
 /* library controls */
 #search { width: 100%; background: #110d0b; border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; color: var(--bone); }

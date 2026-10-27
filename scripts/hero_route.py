@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -181,6 +182,32 @@ NO_DUMP = ("this 3D model kept no clean-up data, so its body would stay at full 
 #: build would still have none.
 NO_DUMP_BUILD = ("Pixal3D on this machine can't save its clean-up data, which the Hero version needs. "
                  "Open Setup and pick Rebuild for Pixal3D, then try again (nothing was downloaded).")
+
+
+def bare_geometry(model: Path) -> bool:
+    """True when a GLB paints nothing of its own: no image, no base-colour map, no vertex
+    colours. Hi3D ships geometry only, so a Hero run over its mesh would finish onto the
+    flat grey the bake falls back to, while the head gets the picture's own paint; such a
+    body is better built from the picture by the route itself (which paints all round).
+    """
+    data = Path(model).read_bytes()
+    if len(data) < 20 or data[:4] != b"glTF":
+        return False                    # not ours to judge; the finish says so if asked
+    chunk, _ = struct.unpack_from("<II", data, 12)
+    try:
+        doc = json.loads(data[20:20 + chunk])
+    except ValueError:
+        return False
+    if doc.get("images"):
+        return False
+    for material in doc.get("materials", []):
+        if (material.get("pbrMetallicRoughness") or {}).get("baseColorTexture") is not None:
+            return False
+    for mesh in doc.get("meshes", []):
+        for primitive in mesh.get("primitives", []):
+            if "COLOR_0" in primitive.get("attributes", {}):
+                return False
+    return True
 
 
 def body_problem(body: Path | None, views: Path | None, dump: Path | None) -> str | None:
@@ -392,7 +419,15 @@ def main() -> int:
     if args.body and not body_raw.exists():
         # The studio's own 3D model of this picture: no second Pixal3D run for the body.
         stage_body_inputs(args.body, args.body_views, args.body_dump, args.body_record, body_raw)
-        run.say(f"body: using {args.body}")
+        if bare_geometry(body_raw) and not (body_raw.with_suffix(".svviews") / "transforms.json").is_file():
+            # A body with no paint of its own and no cameras to match from (Hi3D ships
+            # geometry only) would finish to a flat grey under the sharp new head. Build
+            # the body from the picture instead -- it paints all round -- then the head.
+            run.say(f"body: {args.body.name} paints nothing of its own (Hi3D ships "
+                    "geometry only), so the body is built from the picture, then the head")
+            body_raw.unlink()
+        else:
+            run.say(f"body: using {args.body}")
     if run.step("body: Pixal3D", body_raw):
         run.run(pixal_command(colab, picture, body_raw, "--seed", str(args.seed),
                               *(["--back", str(back)] if back else [])))

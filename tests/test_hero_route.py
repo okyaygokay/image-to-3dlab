@@ -78,6 +78,30 @@ def test_a_body_from_another_engine_has_neither_file_and_is_fine(tmp_path):
     assert hero_route.body_problem(body, None, None) is None
 
 
+def test_a_body_that_paints_nothing_is_bare_geometry(tmp_path):
+    """Hi3D ships geometry only. Such a body has nothing to finish onto (the bake would
+    fall back to its flat grey), so the route builds it from the picture instead."""
+    from image_to_3dlab.photo_paint import _join_glb
+
+    bare = tmp_path / "bare.glb"
+    bare.write_bytes(_join_glb({"asset": {"version": "2.0"}}, b""))
+    assert hero_route.bare_geometry(bare) is True
+
+    painted = tmp_path / "painted.glb"
+    painted.write_bytes(_join_glb({"asset": {"version": "2.0"},
+                                   "images": [{"mimeType": "image/png", "bufferView": 0}]}, b"\0" * 4))
+    assert hero_route.bare_geometry(painted) is False
+
+    vertex_colours = tmp_path / "colours.glb"
+    vertex_colours.write_bytes(_join_glb({"asset": {"version": "2.0"},
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "COLOR_0": 1}}]}]}, b""))
+    assert hero_route.bare_geometry(vertex_colours) is False
+
+    not_a_glb = tmp_path / "odd.glb"
+    not_a_glb.write_bytes(b"glb")                      # the old fake body: not ours to judge
+    assert hero_route.bare_geometry(not_a_glb) is False
+
+
 def test_cameras_that_point_at_nothing_are_an_error_in_plain_words(tmp_path):
     """Someone *asked* for Pixel Match on a body that cannot have it: a --body-views
     directory with no transforms.json is a mistake, not a fallback."""
