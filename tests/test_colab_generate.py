@@ -434,6 +434,43 @@ def test_exec_mode_refuses_without_an_output_or_with_generation_positionals(tmp_
     assert "replaces" in capsys.readouterr().err
 
 
+def test_exec_bin_mode_skips_the_local_script_check_and_runs_the_binary_raw(
+        monkeypatch, tmp_path):
+    """Hero's head clean-up rides this. The binary is built by the backend's bootstrap on
+    the VM, so it does not exist on this disk — the route is for a machine with nothing
+    installed, and a local existence check refused exactly that machine (found on a live
+    run). It must launch as itself, not under the venv's python."""
+    launched: dict = {}
+
+    def fake_launch(session, backend, argv, output_remote):
+        launched["argv"] = argv
+        return "/content/i2l/jobs/1"
+
+    monkeypatch.setattr(cg, "launch_remote_argv", fake_launch)
+    monkeypatch.setattr(cg, "wait_for_remote_job", lambda *a, **k: {"state": "done"})
+    monkeypatch.setattr(cg.colab, "ensure_session", lambda *a, **k: None)
+    monkeypatch.setattr(cg.colab, "stop_idle_sessions", lambda **k: iter(()))
+    monkeypatch.setattr(cg, "ensure_remote_setup", lambda *a, **k: None)
+    monkeypatch.setattr(cg, "sync_tree", lambda *a, **k: None)
+
+    def fake_run(argv, **_kwargs):
+        if argv[0] == "download":
+            Path(argv[2]).write_bytes(b"GLB")
+        return ""
+
+    monkeypatch.setattr(cg.colab, "run", fake_run)
+    dump, out = tmp_path / "head.post.bin", tmp_path / "head.glb"
+    dump.write_bytes(b"dump")
+    rc = cg.main(["--backend", "pixal3d",
+                  "--exec", "vendor/pixal3d-cpp/build/post-replay", "--exec-bin",
+                  "--exec-input", str(dump), "--exec-output", str(out), "--yes",
+                  "--", "{in}", "{out}", "--no-remesh", "--faces", "16000"])
+    assert rc == 0
+    assert launched["argv"][:2] == ["/content/i2l/vendor/pixal3d-cpp/build/post-replay",
+                                    "/content/i2l/inputs/head.post.bin"]
+    assert out.read_bytes() == b"GLB"
+
+
 def test_generate_mode_still_requires_image_and_output(capsys):
     assert cg.main(["--backend", "hi3d", "--yes"]) == 2
     assert "image and an output GLB" in capsys.readouterr().err

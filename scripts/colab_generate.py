@@ -469,10 +469,15 @@ def main(argv: list[str] | None = None) -> int:
     extra = extra + ([] if split is None else argv[split + 1:])
 
     if args.exec_script:
-        script = REPO / args.exec_script
-        if not script.is_file():
-            print(f"error: --exec script does not exist: {args.exec_script}", file=sys.stderr)
-            return 2
+        if not args.exec_bin:
+            # A repo script runs through the backend's venv; it must exist here to be
+            # uploaded. A --exec-bin binary (post-replay) lives in the backend's install
+            # on the VM, not on this disk — checking here would refuse the one machine
+            # the route is for: one with nothing installed.
+            script = REPO / args.exec_script
+            if not script.is_file():
+                print(f"error: --exec script does not exist: {args.exec_script}", file=sys.stderr)
+                return 2
         if args.exec_output is None:
             print("error: --exec needs --exec-output (where the result lands here)",
                   file=sys.stderr)

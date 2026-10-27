@@ -169,7 +169,10 @@ def test_the_colab_mode_builds_supervisor_commands_instead_of_local_ones():
     assert up[up.index("--") + 1:] == ["{in}", "{out}", "--size", "1024"]
 
     replay = hero_route.replay_command(True, Path("d.post.bin"), Path("r.glb"), 16000)
-    assert replay[replay.index("--exec-bin") + 1] == "vendor/pixal3d-cpp/build/post-replay"
+    assert replay[replay.index("--exec") + 1] == "vendor/pixal3d-cpp/build/post-replay"
+    assert "--exec-bin" in replay          # the how; --exec above is the what (a live run died without it)
+    assert replay[replay.index("--exec-input") + 1] == Path("d.post.bin")
+    assert replay[replay.index("--exec-output") + 1] == Path("r.glb")
     assert replay[replay.index("--") + 1:] == ["{in}", "{out}", "--no-remesh",
                                                "--faces", "16000", "--atlas", "2048"]
 

@@ -229,8 +229,12 @@ def replay_command(colab: bool, dump: Path, output: Path, faces: int, atlas: int
 
     if not colab:
         return pixal3d_native.replay_command(dump, output, faces, atlas)
-    return [PYTHON, "-u", COLAB, "--backend", "pixal3d", "--exec-bin",
-            "vendor/pixal3d-cpp/build/post-replay", "--exec-input", dump,
+    # --exec-bin only says *how* to run the script -- without --exec the supervisor takes
+    # the whole thing for a generation and dies on the missing image argument, one live
+    # run deep into the hero route. Hence: both flags, always.
+    return [PYTHON, "-u", COLAB, "--backend", "pixal3d",
+            "--exec", "vendor/pixal3d-cpp/build/post-replay", "--exec-bin",
+            "--exec-input", dump,
             "--exec-output", output, "--keep", "--yes",
             "--", "{in}", "{out}", "--no-remesh", "--faces", str(int(faces)),
             "--atlas", str(int(atlas))]
