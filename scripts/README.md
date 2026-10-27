@@ -210,6 +210,7 @@ The `*_pose.py` files are pure curve maths with no `bpy`, which is why they have
 | `prompt2rig_hands.py` | Hand and finger tracking for the prompt-to-motion route: a clip → per-hand keypoints. |
 | `pack_kimodo_clip.py` | Shrink a Kimodo motion clip to what `kimodo_retarget.py` reads, about 12x smaller. |
 | `pack_smplx_clip.py` | Pack GVHMR's SMPL-X motion into the clip format `kimodo_retarget.py` plays. |
+| `motion_clean.py` | Clean the packed motion clip so it plays planted and smooth on the rig. |
 | `clean_skin_weights.py` | Drop skin weights that come from bones far away in the skeleton, then rebalance. |
 | `kimodo_retarget.py` | Play a Kimodo text-to-motion clip on a SkinTokens-rigged humanoid and export an animated GLB. |
 | `rig_check.py` | Say whether a rigged GLB fits the preset moves (a humanoid), read without Blender. |

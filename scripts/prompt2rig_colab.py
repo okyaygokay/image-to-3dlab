@@ -6,16 +6,21 @@
         [--arm-spread 12] [--speed 1.1]
 
 The remote wrapper `scripts/colab_generate.py` drives for the `prompt2rig` backend,
-installed by `scripts/bootstrap_prompt2rig_colab.py`. Four stages, all on the VM:
+installed by `scripts/bootstrap_prompt2rig_colab.py`. Five stages, all on the VM:
 
 1. **Video** — MiniMax H3 (`fl2va`, int8) acts the prompt out: one person, full body,
-   static camera, ~6 s at 960×544. Motion recovery does not need more than that, and the
-   smaller canvas is ~2.3× faster per step than the trained 768p one.
+   planted on the spot, static camera, ~6 s at 960×544. Motion recovery does not need
+   more than that, and the smaller canvas is ~2.3× faster per step than the trained
+   768p one. Two takes by default (`--tries`): the video model rolls a different actor
+   each seed, and a take whose hands track badly or whose feet wander is thrown away.
 2. **Body motion** — GVHMR lifts SMPL-X motion from the clip (a generated clip has a
    static camera, which is its `-s` fast path).
 3. **Fingers** — WiLoR (or MediaPipe) tracks the hands on the full-rate clip, in parallel
    thinking, and `prompt2rig_hands` hands them over as wrist-relative world keypoints.
-4. **Retarget** — `pack_smplx_clip` packs the motion into the clip format the Animate tab
+4. **Clean** — `motion_clean` pins planted feet (the skate), takes the slow wander out
+   of the floor (the float) and the frame-to-frame shimmer out of the rotations, and
+   scores each take on what is left; the best take is kept.
+5. **Retarget** — `pack_smplx_clip` packs the motion into the clip format the Animate tab
    plays, and `kimodo_retarget` plays it on the uploaded rig — the same command the
    preset path runs, imported from `viewer/autorig_api`, so the routes cannot drift.
 
@@ -28,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -81,10 +87,14 @@ def snapped_frames(seconds: float) -> int:
 
 def motion_prompt(user_prompt: str) -> str:
     """The description H3 acts out: the user's motion, framed so exactly one full body
-    performs it in place — the shape of clip GVHMR recovers best."""
-    return (f"One person {user_prompt.rstrip('.')}. Full body visible and centered, the "
-            "whole person stays in frame for the entire clip, static camera, medium-wide "
-            "shot, flat lighting, plain studio background, realistic human proportions.")
+    performs it planted on the spot — the shape of clip the motion fixer and the
+    retargeter play best. "Stays in frame" alone let H3's actors wander mid-action
+    (found live: a hammering clip whose root crept 30 cm and bobbed 23 cm)."""
+    return (f"One person {user_prompt.rstrip('.')}, standing in one spot with both feet "
+            "planted on the floor, not walking or stepping around. Full body visible and "
+            "centered, the whole person stays in frame for the entire clip, static camera, "
+            "medium-wide shot, flat lighting, plain studio background, realistic human "
+            "proportions.")
 
 
 def render_keyframe(rigged: Path, out: Path) -> bool:
@@ -220,22 +230,21 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--prompt", required=True, help="the motion to act out")
     parser.add_argument("--seconds", type=float, default=6.0)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--tries", type=int, default=2,
+                        help="how many takes to act out; the best-scoring one is kept")
     parser.add_argument("--arm-spread", type=float, default=0.0)
     parser.add_argument("--speed", type=float, default=1.0)
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse(argv)
+def take(args: argparse.Namespace, work: Path, seed: int, keyframe: Path | None) -> dict:
+    """One take: video → body motion → hands → pack → clean, all under `work/`.
 
-    work = args.result.parent / "prompt2rig"
-    work.mkdir(parents=True, exist_ok=True)
-    clip, packed = args.result.with_suffix(".clip.mp4"), args.result.with_suffix(".motion.npz")
-
-    keyframe = work / "keyframe.png"
-    if not render_keyframe(args.rigged, keyframe):
-        keyframe = None
-    generate_clip(args.prompt, args.seconds, args.seed, clip, keyframe)
+    Each stage skips what already exists, so an interrupted take resumes instead of
+    paying for its video again. Returns the artifacts plus the cleaner's report.
+    """
+    clip = work / "clip.mp4"
+    generate_clip(args.prompt, args.seconds, seed, clip, keyframe)
     gvhmr_clip = reencode_for_gvhmr(clip, work)
     motion = recover_motion(gvhmr_clip, work)
     frames = len(motion["motion"]["transl"])
@@ -250,7 +259,55 @@ def main(argv: list[str] | None = None) -> int:
                                   motion["motion"]["transl"],
                                   BODY_MODELS / "smplx" / "SMPLX_NEUTRAL.npz",
                                   hands=hands, fps=30.0)
+
+    import motion_clean
+
+    arrays, report = motion_clean.clean(arrays["quats"], arrays["joints0"],
+                                        arrays["hips"], 30.0)
+    log("clean: " + "  ".join(f"{key}={value}" for key, value in report.items()))
+    packed = work / "motion.npz"
     np.savez_compressed(packed, **arrays)
+    return {"clip": clip, "packed": packed, "report": report, "hands": hands}
+
+
+def score_of(one: dict) -> float:
+    """Which take plays best: hands tracked, planted in place, feet still, no shimmer.
+
+    Numbers the cleaner's report already carries, weighted to match what reads as bad on
+    the rig: hands lead (nothing else in the chain fixes them), planted-in-place next
+    (a wandering take cannot be pinned), then slide, then shimmer.
+    """
+    import numpy as np
+
+    hands = one["hands"] or {}
+    valid = (float(np.mean([np.asarray(side["valid"]).mean() for side in hands.values()]))
+             if hands else 0.0)
+    report = one["report"]
+    return (100.0 * valid + (100.0 if report["pinned"] else 0.0)
+            - report["slide_after"] - 0.1 * report["shimmer_after"])
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse(argv)
+
+    work = args.result.parent / "prompt2rig"
+    work.mkdir(parents=True, exist_ok=True)
+    clip, packed = args.result.with_suffix(".clip.mp4"), args.result.with_suffix(".motion.npz")
+
+    keyframe = work / "keyframe.png"
+    if not render_keyframe(args.rigged, keyframe):
+        keyframe = None
+    takes = []
+    for i in range(max(1, args.tries)):
+        take_work = work / f"try{i}"
+        take_work.mkdir(parents=True, exist_ok=True)
+        log(f"take {i + 1} of {max(1, args.tries)} (seed {args.seed + i})")
+        takes.append(take(args, take_work, args.seed + i, keyframe))
+        log(f"take {i + 1} scores {score_of(takes[-1]):.1f}")
+    best = max(takes, key=score_of)
+    shutil.copy(best["clip"], clip)
+    shutil.copy(best["packed"], packed)
+    log(f"keeping take {takes.index(best) + 1} (score {score_of(best):.1f})")
 
     # Stage 4: the preset path's own command, so both routes stay one command apart.
     import autorig_api

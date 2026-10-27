@@ -40,6 +40,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `move_description` advanced choice. See [docs/colab-gpu.md](docs/colab-gpu.md).
 
 ### Fixed
+- **A described motion now plays planted on the rig — the skate, the float and the
+  shimmer come off, and only good takes survive.** The H3 actor wandered its scene, so a
+  "hammering" clip crept 30 cm, bobbed 23 cm and shimmered frame to frame, and exactly
+  one take of it existed whether it was good or not. The wrapper now acts the prompt out
+  twice (`--tries`, each take in its own scratch dir so an interrupted take resumes),
+  cleans each packed clip with `scripts/motion_clean.py` — planted feet pinned to where
+  they landed via a smoothed two-pass root correction, the floor's slow wander taken out
+  of the height, rotations de-noised by SVD-orthonormalised window averaging with frame 0
+  never touched (it must stay consistent with `joints0`) — scores the takes on hand
+  validity, feet planted, slide and shimmer, and keeps the best one. A clip whose root
+  genuinely travels (a walk) is detected and left alone. On the live bad clip: slide
+  1.4 → 0.7 cm, floor bob 11.6 → 5.2 cm, shimmer 27.3 → 20.5 mm, feet pinned. Every
+  number lands in the run log as a before/after report.
 - **Hero face over a body that paints nothing builds that body from the picture.** Hi3D
   ships geometry only, so a Hero run over its mesh finished onto the flat grey the bake
   falls back to, under the sharp new head — the body read as unfinished ("only the head
