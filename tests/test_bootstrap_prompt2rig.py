@@ -235,3 +235,30 @@ def test_a_warm_ltx2_vm_pays_for_nothing_twice(monkeypatch, tmp_path):
     assert [c for c in commands if len(c) > 1 and c[1] == "download"] == []
     assert any(c[:2] == ["uv", "venv"] for c in commands)
     assert bp.marker("ltx2").read_text() == bp.LTX2_BUILD
+
+
+def test_a_warm_ltx2_rebuild_charges_only_the_venv(monkeypatch, tmp_path):
+    """The disk guard charges what is missing: a VM that already holds the 71 GB of
+    weights must be allowed to rebuild an 8 GB venv on 10 GB free — the cold guard
+    (71 GB for everything) refused exactly that, live, on a full VM."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(bp, "DRIVER", tmp_path)
+    monkeypatch.setattr(bp, "LTX2_VENV", tmp_path / "ltx2" / ".venv")
+    monkeypatch.setattr(bp.shutil, "disk_usage", lambda _p: SimpleNamespace(free=10e9))
+    monkeypatch.setattr(bp, "require_cu128_driver", lambda: None)
+    bp.marker("ltx2-weights").write_text(bp.LTX2_MS_REVISION)
+    commands: list = []
+    monkeypatch.setattr(bp, "must", lambda command, *, what, timeout: commands.append(command))
+    bp.ensure_ltx2()                                # 10 GB free, venv-only need: runs
+    assert any(c[:2] == ["uv", "venv"] for c in commands)
+    assert bp.marker("ltx2").read_text() == bp.LTX2_BUILD
+
+    # the same 10 GB free with no weights on disk is a cold install: refused, loudly,
+    # before anything is built or fetched
+    bp.marker("ltx2").unlink()
+    bp.marker("ltx2-weights").unlink()
+    commands.clear()
+    with pytest.raises(SystemExit, match="skipping it"):
+        bp.ensure_ltx2()
+    assert commands == []

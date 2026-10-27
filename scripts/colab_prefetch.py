@@ -32,8 +32,11 @@ from pathlib import Path
 
 #: An install this big may touch the GPU, so it waits for the running job to finish.
 HEAVY_GB = 20
-#: Free-space headroom on top of every estimate, for the unpacking a download needs.
-HEADROOM_GB = 10
+#: Free-space floor the prefetch leaves behind, on top of every estimate. It is not
+#: just unpacking room: the next job needs scratch space (a clip, motion dumps, chunked
+#: artifact pieces), and a warm VM may need a venv rebuilt — 10 GB left a stuffed VM
+#: with nothing left to run anything on (found live, at 0.4 GB free).
+HEADROOM_GB = 30
 #: A `running` job marker older than this is a waiter that died, not a job.
 MARKER_STALE_SECONDS = 8 * 60 * 60
 

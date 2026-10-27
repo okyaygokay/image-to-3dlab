@@ -93,6 +93,9 @@ LTX2_INCLUDE = [
     "vae/*", "audio_vae/*", "diffusion_decoder/*", "duration_head/*", "vocoder/*",
 ]
 LTX2_GB = 71.0
+#: The ltx2 venv alone (torch cu128, diffusers main, transformers, PyAV) — what a warm
+#: rebuild charges the disk, against the 71 GB of a cold install's weights and venv.
+LTX2_PACKAGE_GB = 8.0
 DIFFUSERS_MAIN_COMMIT = "06a9cfb86ae8aa69c6a220ba0da0f37b819dde6a"
 LTX2_TRANSFORMERS, LTX2_ACCELERATE = "5.21.0", "1.15.0"
 MODELSCOPE_VERSION = "1.40.2"
@@ -383,10 +386,17 @@ def ensure_ltx2() -> None:
     actually asks for `--video-engine ltx2`."""
     if marker("ltx2").is_file() and marker("ltx2").read_text() == LTX2_BUILD:
         return
+    # Charge the disk only for what is missing: a warm rebuild (the venv's package set
+    # changed) must not be refused for lack of the 71 GB the weights already occupy —
+    # that exact refusal stopped the first live rebuild, on a VM the prefetch had
+    # stuffed full.
+    weights = marker("ltx2-weights")
+    have_weights = weights.is_file() and weights.read_text() == LTX2_MS_REVISION
+    need_gb = LTX2_PACKAGE_GB if have_weights else LTX2_GB
     free_gb = shutil.disk_usage(str(REPO)).free / 1e9
-    if free_gb < LTX2_GB + 10:
+    if free_gb < need_gb + 2:
         raise SystemExit(
-            f"LTX-2.5 needs about {LTX2_GB:.0f} GB and this VM has {free_gb:.0f} GB free; "
+            f"LTX-2.5 needs about {need_gb:.0f} GB and this VM has {free_gb:.0f} GB free; "
             "skipping it (the default H3 engine needs no extra room)")
     require_cu128_driver()
     index = host.TORCH_INDEX + "cu128"
@@ -395,8 +405,7 @@ def ensure_ltx2() -> None:
           f"modelscope=={MODELSCOPE_VERSION}"],
          what="installing the modelscope CLI for the LTX-2.5 download", timeout=1200)
     # Weights before venv: a venv build that fails must not re-trigger the weights pass.
-    weights = marker("ltx2-weights")
-    if not (weights.is_file() and weights.read_text() == LTX2_MS_REVISION):
+    if not have_weights:
         print(f"downloading LTX-2.5 ({LTX2_GB:.0f} GB, one time on this VM) from ModelScope "
               f"(ungated mirror; pinned revision {LTX2_MS_REVISION[:8]})", flush=True)
         must([modelscope(), "download", LTX2_MS_MODEL, "--revision", LTX2_MS_REVISION,
