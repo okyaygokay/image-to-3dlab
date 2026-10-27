@@ -8,14 +8,17 @@
 The remote wrapper `scripts/colab_generate.py` drives for the `prompt2rig` backend,
 installed by `scripts/bootstrap_prompt2rig_colab.py`. Five stages, all on the VM:
 
-1. **Video** — MiniMax H3 (`fl2va`, int8) acts the prompt out: one person, full body,
-   planted on the spot, static camera, ~6 s at 960×544. Motion recovery does not need
-   more than that, and the smaller canvas is ~2.3× faster per step than the trained
-   768p one. `--video-engine ltx2` swaps in LTX-2.5 distilled — the anti-flicker pick
-   (flicker is what motion recovery turns into shimmer), ~71 GB installed on the VM on
-   first use, from an ungated ModelScope mirror of the weights. Two takes by default
-   (`--tries`): the video model rolls a different actor each seed, and a take whose
-   hands track badly or whose feet wander is thrown away.
+1. **Video** — LTX-2.5 distilled acts the prompt out: one person, full body, planted on
+   the spot, static camera, ~6 s at 960×544. It won the A/B that decided this default
+   (same rig, same prompt, against H3): recovery shimmer 5.6 vs 25.1, finger jitter
+   5.8 vs 26.7, hands tracked 97%/100% vs 82%/91% — the flicker H3's clips carried is
+   what motion recovery turned into shimmer and broken-looking hands. Its ~71 GB of
+   weights install on the VM on first use, from an ungated ModelScope mirror.
+   `--video-engine h3` keeps MiniMax H3 (`fl2va`, int8) available: motion recovery does
+   not need more than the smaller canvas, which is ~2.3× faster per step than its
+   trained 768p one. Two takes by default (`--tries`): the video model rolls a
+   different actor each seed, and a take whose hands track badly or whose feet wander
+   is thrown away.
 2. **Body motion** — GVHMR lifts SMPL-X motion from the clip (a generated clip has a
    static camera, which is its `-s` fast path).
 3. **Fingers** — WiLoR (or MediaPipe) tracks the hands on the full-rate clip, in parallel
@@ -138,7 +141,7 @@ def render_keyframe(rigged: Path, out: Path) -> bool:
 
 
 def generate_clip(prompt: str, seconds: float, seed: int, out: Path,
-                  keyframe: Path | None = None, engine: str = "h3") -> None:
+                  keyframe: Path | None = None, engine: str = "ltx2") -> None:
     """Stage 1: the acting clip. MiniMax H3 (int8) by default; LTX-2.5 distilled with
     `engine="ltx2"` — the anti-flicker pick, and flicker is exactly what motion
     recovery turns into shimmer. Both land at 24 fps, so nothing downstream knows
@@ -300,10 +303,10 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--tries", type=int, default=2,
                         help="how many takes to act out; the best-scoring one is kept")
-    parser.add_argument("--video-engine", choices=("h3", "ltx2"), default="h3",
-                        help="Who acts the prompt out: MiniMax H3 (default) or LTX-2.5 "
-                             "distilled (the anti-flicker pick; installs ~71 GB on the "
-                             "VM on first use)")
+    parser.add_argument("--video-engine", choices=("h3", "ltx2"), default="ltx2",
+                        help="Who acts the prompt out: LTX-2.5 distilled (default — "
+                             "won the A/B: a quarter of H3's shimmer, hands tracked "
+                             "97%/100% vs 82%/91%) or MiniMax H3 (int8)")
     parser.add_argument("--arm-spread", type=float, default=0.0)
     parser.add_argument("--speed", type=float, default=1.0)
     return parser.parse_args(argv)

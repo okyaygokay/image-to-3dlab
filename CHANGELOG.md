@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one, the connectors' unsharded duplicate and the 10 GB prompt-enhancer pair are all
   left out (this chain writes its own long captions). Licence is the friendly one —
   LTX-2.x Community License: free including commercial use under $10M revenue, no
-  mandatory branding. H3 stays the default until the A/B says otherwise.
+  mandatory branding. **It won the A/B and is the default**: same rig, same prompt,
+  against H3 — recovery shimmer 5.6 vs 25.1, finger jitter 5.8 vs 26.7, hands tracked
+  97%/100% vs 82%/91%. `--video-engine h3` keeps MiniMax H3 available.
 - **One warm Colab VM for the whole lab, with the other backends installing onto it while
   a job runs.** Every step's next click used to pay the same 15–30 minute VM install the
   last one did. Jobs now land on one shared session (`i2l-lab`), started by the first job
