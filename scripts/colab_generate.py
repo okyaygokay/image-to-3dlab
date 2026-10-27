@@ -181,7 +181,7 @@ def sync_tree(session: str) -> None:
         archive = _sync_archive(Path(scratch) / "i2l-code.tar.gz")
         size = archive.stat().st_size
         remote = f"{REMOTE_ROOT}/i2l-code.tar.gz"
-        colab.run(["upload", str(archive), remote, "-s", session], timeout=600, attempts=3)
+        colab.upload(session, archive, remote, timeout=600)
     colab.run(["exec", "-s", session, "--timeout", "180"], attempts=3,
               stdin=(
                   "import os, tarfile\n"
@@ -572,10 +572,9 @@ def main(argv: list[str] | None = None) -> int:
                         f"{REMOTE_ROOT + '/jobs'!r})]",
                   timeout=240)
         if remote_in is not None:
-            # Three tries: a large upload over a hotel-quality link dies to a connection
-            # reset now and then, and one flaky byte should not cost a 20-minute run.
-            colab.run(["upload", str(upload_source), remote_in, "-s", session],
-                      timeout=600, attempts=3)
+            # However large it is: the 342 MB clean-up dump rides the same call as a
+            # 1 MB crop, in pieces the contents API has proven it can carry.
+            colab.upload(session, upload_source, remote_in, timeout=600)
             log(f"uploaded {upload_source.name}")
         sync_tree(session)
         ensure_remote_setup(session, args.backend, skip=args.skip_setup)

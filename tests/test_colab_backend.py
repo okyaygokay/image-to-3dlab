@@ -294,6 +294,52 @@ def test_a_command_that_ran_and_failed_is_not_rerun(monkeypatch):
     assert calls["n"] == 1
 
 
+def test_a_file_over_the_apis_ceiling_rides_in_proven_sized_pieces(monkeypatch, tmp_path):
+    """The contents API rejects an upload body somewhere between 60 and 100 MB (probed
+    live: a 342 MB clean-up dump died three ways). Such a file is split under the
+    ceiling, and one exec concatenates, drops the parts and checks the checksum."""
+    monkeypatch.setattr(cb, "UPLOAD_CHUNK", 10)
+    calls = []
+
+    def record(args, **kwargs):
+        calls.append((list(args), kwargs))
+        return "reassembled 3 parts -> ok"
+
+    monkeypatch.setattr(cb, "run", record)
+    local = tmp_path / "dump.post.bin"
+    payload = b"0123456789abcdefghij01234"          # 25 bytes -> three parts, the last short
+    local.write_bytes(payload)
+    cb.upload("s", local, "/content/i2l/outputs/dump.post.bin")
+
+    uploads = [args for args, _ in calls if args[0] == "upload"]
+    assert [Path(u[1]).name for u in uploads] == ["dump.post.bin.part0000",
+                                                  "dump.post.bin.part0001",
+                                                  "dump.post.bin.part0002"]
+    assert all(u[2].startswith("/content/i2l/outputs/dump.post.bin.part") for u in uploads)
+    (exec_args, exec_kwargs) = next((a, k) for a, k in calls if a[0] == "exec")
+    assert "--timeout" in exec_args
+    code = exec_kwargs["stdin"]
+    assert "copyfileobj" in code and "checksum mismatch" in code
+    import hashlib
+    assert hashlib.md5(payload).hexdigest() in code
+
+
+def test_a_small_file_uploads_whole(monkeypatch, tmp_path):
+    monkeypatch.setattr(cb, "UPLOAD_CHUNK", 10)
+    calls = []
+
+    def record(args, **_kwargs):
+        calls.append(list(args))
+        return ""
+
+    monkeypatch.setattr(cb, "run", record)
+    local = tmp_path / "crop.png"
+    local.write_bytes(b"tiny")
+    cb.upload("s", local, "/content/i2l/inputs/crop.png")
+    assert [c[0] for c in calls] == ["upload"]
+    assert calls[0][2] == "/content/i2l/inputs/crop.png"
+
+
 def test_a_warm_session_is_reused_instead_of_paying_the_install_again(tmp_path):
     """The GUI starts a job per click. A fresh VM installs for 15-30 minutes first, so
     every click paying that is not a usable interface -- a session still inside its idle

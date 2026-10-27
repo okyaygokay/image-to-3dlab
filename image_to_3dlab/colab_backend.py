@@ -24,6 +24,7 @@ stopped -- by the watchdog while you are away, or by the next command if it is n
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -325,6 +326,56 @@ def session_exists(session: str) -> bool:
     except ColabError:
         return False
     return session in listing
+
+
+#: The contents API refuses an upload body somewhere between 60 and 100 MB (probed on a
+#: live G4 session: 60 MB arrives, 100 MB dies to a broken pipe, a 342 MB clean-up dump
+#: to a 400). 48 MB clears the proven floor with margin.
+UPLOAD_CHUNK = 48 * 1024 * 1024
+
+
+def upload(session: str, local: Path, remote: str, *, timeout: float = 600) -> None:
+    """Upload `local` to `remote` on the session, however large it is.
+
+    Small files go straight through `colab upload`. A big one is split into parts under
+    the contents API's ceiling, the parts are uploaded beside the target, and one exec
+    concatenates them and checks the result — so the one file a later step needs (a
+    342 MB clean-up dump, say) rides the same flaky link in proven-sized pieces.
+    """
+    local = Path(local)
+    size = local.stat().st_size
+    if size <= UPLOAD_CHUNK:
+        run(["upload", str(local), remote, "-s", session], timeout=timeout, attempts=3)
+        return
+
+    parent, name = remote.rsplit("/", 1)
+    digest = hashlib.md5(local.read_bytes()).hexdigest()
+    parts = []
+    with tempfile.TemporaryDirectory(prefix="i2l-chunk-") as scratch:
+        with local.open("rb") as source:
+            index = 0
+            while chunk := source.read(UPLOAD_CHUNK):
+                part = Path(scratch) / f"{name}.part{index:04d}"
+                part.write_bytes(chunk)
+                parts.append(part.name)
+                index += 1
+        for part in parts:
+            run(["upload", str(Path(scratch) / part), f"{parent}/{part}", "-s", session],
+                timeout=timeout, attempts=3)
+    # one block, one pass: concatenate, drop the parts, hash the result — a mismatch
+    # aborts the exec, which surfaces as a failed job instead of a corrupt replay
+    code = (
+        "import hashlib, os, shutil\n"
+        f"parts = sorted(p for p in os.listdir({parent!r}) if p.startswith({name + '.part'!r}))\n"
+        f"with open({remote!r}, 'wb') as out:\n"
+        "    for part in parts:\n"
+        f"        shutil.copyfileobj(open(os.path.join({parent!r}, part), 'rb'), out)\n"
+        f"for part in parts: os.remove(os.path.join({parent!r}, part))\n"
+        f"digest = hashlib.md5(open({remote!r}, 'rb').read()).hexdigest()\n"
+        f"print('reassembled', len(parts), 'parts ->', digest)\n"
+        f"if digest != {digest!r}: raise SystemExit('checksum mismatch after reassembly')\n"
+    )
+    run(["exec", "-s", session, "--timeout", "600"], stdin=code, timeout=700, attempts=3)
 
 
 def ensure_session(config: RemoteConfig, *, log=lambda message: None) -> None:
