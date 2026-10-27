@@ -182,9 +182,17 @@ def fix_spot(source: Path, output: Path, point: np.ndarray, radius: float,
         return {"cut": 0, "capped": 0}
     keep = faces[~cut]
     loops = _boundary_loops(keep, key)
-    # only the openings this cut made: every rim vertex was on a removed triangle
+    # Only the openings this cut made. In clean ground every rim vertex was on a removed
+    # triangle. But a brush that lands ON a hole that was already there -- the pupil holes
+    # a Hero face can have -- merges its rim with the hole's old untouched vertices into
+    # one loop, so a loop that was no loop before the cut is this cut's too (2026-10-27,
+    # blacksmith hero: a pupil patch cut 4 and capped 0, leaving the hole bigger).
     touched = set(np.unique(key[faces[cut]]).tolist())
-    loops = [loop for loop in loops if all(int(key[a]) in touched for a, _ in loop)]
+    before = {frozenset(int(key[a]) for a, _ in loop) for loop in _boundary_loops(faces, key)}
+    loops = [loop for loop in loops
+             if all(int(key[a]) in touched for a, _ in loop)
+             or (frozenset(int(key[a]) for a, _ in loop) not in before
+                 and any(int(key[a]) in touched for a, _ in loop))]
     # The cap gets its own vertices (same places as the rim, so the shape stays closed), all
     # reading ONE texel: the rim's most typical colour. Stretching the rim's own UVs across a
     # fan smeared everything between them into stripes (2026-10-20, gnoll pupils).

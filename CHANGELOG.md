@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `move_description` advanced choice. See [docs/colab-gpu.md](docs/colab-gpu.md).
 
 ### Fixed
+- **Fix a spot closes a hole it lands on.** A fill whose brush met a hole already in the
+  mesh — a Hero face's dark pupil, the very case the guide sends the brush to — merged its
+  rim with the hole's old vertices into one loop, and the "only openings this cut made"
+  test (every rim vertex on a removed triangle) dropped it: the pupil patch cut 4 faces
+  and capped none, leaving the hole bigger. A loop that was no loop before the cut is now
+  this cut's too. Found live on the blacksmith hero model.
 - **Finish's retopology accepts a model with no texture.** Hi3D emits geometry plus a flat
   colour (`baseColorFactor`) and leaves painting to a later stage, so running Finish on its
   output died with "could not find the base colour texture to transfer", which reads as a

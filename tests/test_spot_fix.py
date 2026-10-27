@@ -11,18 +11,21 @@ from image_to_3dlab import photo_paint as pp
 from image_to_3dlab import spot_fix as sf
 
 
-def _sphere_with_pocket(tmp_path, n=24, texture=4):
+def _sphere_with_pocket(tmp_path, n=24, texture=4, hole=False):
     """A UV sphere (facing +Z at the front) with a pocket pushed into its front."""
     lat, lon = np.meshgrid(np.linspace(0, np.pi, n), np.linspace(0, 2 * np.pi, n, endpoint=False), indexing="ij")
     pos = np.stack([np.sin(lat) * np.sin(lon), np.cos(lat), np.sin(lat) * np.cos(lon)], -1).reshape(-1, 3)
     front = np.argmax(pos[:, 2])
-    pos[front] *= 0.4                                  # the pocket: one vertex sunk deep
+    if not hole:
+        pos[front] *= 0.4                              # the pocket: one vertex sunk deep
     faces = []
     for i in range(n - 1):
         for j in range(n):
             a, b, c, d = i * n + j, i * n + (j + 1) % n, (i + 1) * n + j, (i + 1) * n + (j + 1) % n
             faces += [(a, c, b), (b, c, d)]
     faces = np.array(faces)
+    if hole:        # a hole that was already there, like a Hero face's dark pupil
+        faces = faces[(faces != front).all(1)]
     uvs = np.stack([lon.ravel() / (2 * np.pi), lat.ravel() / np.pi], 1)
     png = io.BytesIO()
     picture = Image.new("RGB", (texture, texture), (0, 0, 0))     # black = unused texture space
@@ -70,6 +73,22 @@ def test_the_pocket_is_lifted_and_the_mesh_stays_closed(tmp_path):
     # the new patch sits near the surface, not down in the pocket
     assert out_pos[:, 2].max() > 0.8
     assert len(out_uv) == len(out_pos) and texture.shape[:2] == (4, 4)
+
+
+def test_a_brush_that_lands_on_the_edge_of_a_hole_that_was_already_there_caps_it(tmp_path):
+    """Clicking ON a hole (a Hero pupil) merges the cut rim with the hole's old rim; the
+    merged loop carries old untouched vertices, and used to be skipped -- the hole stayed,
+    now bigger. It must be capped like any other opening this cut made."""
+    from image_to_3dlab import surface_calm as sc
+
+    source, pos, _front = _sphere_with_pocket(tmp_path, hole=True)
+    faces = pp.read_glb(source)[2].reshape(-1, 3)
+    rim = pos[sf._boundary_loops(faces, sc.weld(pos))[0][0][0]]     # a vertex on the hole's rim
+    report = sf.fix_spot(source, tmp_path / "out.glb", rim, radius=0.1)
+    assert report["cut"] > 0                       # the brush really met the hole
+    assert report["capped"] == 1
+    out_pos, _uv, out_faces, _tex = pp.read_glb(tmp_path / "out.glb")
+    assert _open_edges(out_faces.reshape(-1, 3), out_pos) == 0      # closed again, all the way
 
 
 def test_triangles_far_from_the_spot_are_untouched(tmp_path):
