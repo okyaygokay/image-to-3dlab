@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -276,10 +277,17 @@ def run(args: list[str], *, timeout: float = 180, stdin: str | None = None,
     would hang the studio's whole job queue rather than failing one job.
 
     ``attempts`` is for calls whose first failure is often not a failure: a VM that
-    is still bringing its kernel up does not answer at all, and a large upload dies
+    is still bringing its kernel up does not answer at all, and a large transfer dies
     to a connection reset now and then, so callers pass a retry count rather than
-    treating the first silence or reset as a dead session.
+    treating the first silence or reset as a dead session. A non-zero exit is retried
+    only when the CLI's own words say the transport dropped (a reset, a broken pipe):
+    a command that ran and failed has made its side effects, and must not run again.
     """
+    transient = re.compile(
+        r"Connection aborted|ConnectionResetError|BrokenPipeError|Broken pipe|"
+        r"Connection reset by peer|Read timed out|ReadTimeout|RemoteDisconnected|"
+        r"urllib3\.util\.retry|NewConnectionError|Failed to establish a new connection",
+        re.IGNORECASE)
     last = ""
     for attempt in range(1, max(1, attempts) + 1):
         try:
@@ -302,6 +310,10 @@ def run(args: list[str], *, timeout: float = 180, stdin: str | None = None,
             )
         combined = (proc.stdout or "") + (proc.stderr or "")
         if proc.returncode != 0:
+            if attempt < attempts and transient.search(combined):
+                last = f"`colab {args[0]}` hit a network blip (attempt {attempt})"
+                time.sleep(20 * attempt)
+                continue
             raise ColabError(f"`colab {args[0]}` failed:\n{combined.strip()[-1500:]}")
         return combined
     raise ColabError(last or f"`colab {args[0]}` failed")

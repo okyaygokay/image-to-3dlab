@@ -245,6 +245,55 @@ def test_retries_are_bounded(monkeypatch):
         cb.run(["exec", "-s", "s"], timeout=1, attempts=3)
 
 
+def test_a_network_blip_on_a_transfer_is_retried_not_fatal(monkeypatch):
+    """A large upload dying to 'Connection reset by peer'/'Broken pipe' is a flaky byte,
+    not a dead session -- but it exits non-zero, which the retry used to treat as final.
+    Found on live hero runs: the run died at the same upload twice."""
+    calls = {"n": 0}
+
+    class Blip:
+        returncode = 1
+        stdout = ""
+        stderr = "[colab] Upload failed: ('Connection aborted.', BrokenPipeError(32, 'Broken pipe'))"
+
+    class Ok:
+        returncode = 0
+        stdout = "uploaded"
+        stderr = ""
+
+    def flaky(*_args, **_kwargs):
+        calls["n"] += 1
+        return Blip() if calls["n"] == 1 else Ok()
+
+    monkeypatch.setattr(cb.shutil, "which", lambda name: "/usr/bin/colab")
+    monkeypatch.setattr(cb.subprocess, "run", flaky)
+    monkeypatch.setattr(cb.time, "sleep", lambda _s: None)
+    assert cb.run(["upload", "big.bin", "r", "-s", "s"], timeout=1, attempts=3) == "uploaded"
+    assert calls["n"] == 2
+
+
+def test_a_command_that_ran_and_failed_is_not_rerun(monkeypatch):
+    """Only the CLI's own transport words earn a retry. An exec whose code failed has
+    already made its side effects; running it again would repeat them."""
+    calls = {"n": 0}
+
+    class Boom:
+        returncode = 3
+        stdout = "ValueError: bad arguments, the job was not started"
+        stderr = ""
+
+    def once(*_args, **_kwargs):
+        calls["n"] += 1
+        return Boom()
+
+    monkeypatch.setattr(cb.shutil, "which", lambda name: "/usr/bin/colab")
+    monkeypatch.setattr(cb.subprocess, "run", once)
+    monkeypatch.setattr(cb.time, "sleep", lambda _s: None)
+    with pytest.raises(cb.ColabError, match="failed"):
+        cb.run(["exec", "-s", "s"], timeout=1, attempts=3)
+    assert calls["n"] == 1
+
+
 def test_a_warm_session_is_reused_instead_of_paying_the_install_again(tmp_path):
     """The GUI starts a job per click. A fresh VM installs for 15-30 minutes first, so
     every click paying that is not a usable interface -- a session still inside its idle
