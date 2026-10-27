@@ -472,6 +472,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="A local file to upload first; its remote path replaces {in}.")
     parser.add_argument("--exec-output", type=Path, metavar="LOCAL",
                         help="Where the remote output lands here; its remote path replaces {out}.")
+    parser.add_argument("--exec-artifacts", nargs="+", metavar="NAME", default=[],
+                        help="With --exec: extra file names the helper writes beside its "
+                             "output on the VM (the check sheet's other shots, say), "
+                             "fetched beside the output here. Missing ones are skipped.")
     parser.add_argument("--exec-bin", action="store_true",
                         help="With --exec: run SCRIPT as a binary in the backend's install "
                              "(e.g. vendor/pixal3d-cpp/build/post-replay), not under the venv's "
@@ -581,6 +585,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.exec_script:
             forwarded = [value.replace("{in}", remote_in or "").replace("{out}", remote_out)
+                         .replace("{outdir}", str(Path(remote_out).parent))
                          for value in extra]
             prefix = ([f"{REMOTE_ROOT}/{args.exec_script}"] if args.exec_bin
                       else [REMOTE_PYTHON[args.backend], f"{REMOTE_ROOT}/{args.exec_script}"])
@@ -604,6 +609,17 @@ def main(argv: list[str] | None = None) -> int:
                 f"missing; check with `colab ls -s {session} {REMOTE_ROOT}/outputs`."
             )
         log(f"wrote {local_out}")
+        if args.exec_script and args.exec_artifacts:
+            # A helper's side files: named, not suffixed, because they are written by the
+            # helper itself (the check sheet's shots), not by a wrapper's convention.
+            for name in args.exec_artifacts:
+                side = f"{Path(remote_out).parent}/{name}"
+                try:
+                    colab.run(["download", side, str(local_out.parent / name), "-s", session],
+                              timeout=600, attempts=3)
+                except colab.ColabError:
+                    continue  # the helper decides what it writes; absent is not an error
+            log(f"brought back the helper's side files beside {local_out.name}")
         if not args.exec_script:
             # A generation's side files, never an --exec helper's: the helper's output has
             # no run record, and looking would cost three REST round-trips for 404s.

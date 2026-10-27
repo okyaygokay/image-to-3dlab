@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import sys
+from pathlib import Path
 
 from scripts import hero_route
 
@@ -175,6 +176,33 @@ def test_the_colab_mode_builds_supervisor_commands_instead_of_local_ones():
     assert replay[replay.index("--exec-output") + 1] == Path("r.glb")
     assert replay[replay.index("--") + 1:] == ["{in}", "{out}", "--no-remesh",
                                                "--faces", "16000", "--atlas", "2048"]
+
+
+def test_the_blender_legs_follow_the_rigger_not_pixal3d(monkeypatch, tmp_path):
+    """join and the check sheet run hero_blender.py wherever bpy lives. That is the local
+    SkinTokens venv when installed, else the rented VM — the same fallback the throwaway
+    rigger uses, and the legs a live hero run died on when the venv was missing here
+    (found three fixes deep: everything before them already worked)."""
+    import autorig_api
+
+    join = hero_route.blender_command(True, "join", Path("g.glb"), Path("j.glb"))
+    assert join[join.index("--backend") + 1] == "autorig"      # the venv with bpy, not pixal3d's
+    assert join[join.index("--exec") + 1] == "scripts/hero_blender.py"
+    assert "--keep" in join                                    # the check reuses the session
+    assert join[join.index("--") + 1:] == ["join", "{in}", "{out}"]
+
+    check = hero_route.blender_command(True, "check", Path("hero.glb"),
+                                       Path("check/head_front.png"))
+    shots = check[check.index("--exec-artifacts") + 1:check.index("--")]
+    assert "body_front.png" in shots and "head_back.png" in shots
+    forwarded = check[check.index("--") + 1:]
+    assert forwarded[:3] == ["check", "{in}", "{outdir}"]      # the sheet's directory
+
+    monkeypatch.setattr(autorig_api, "installed", lambda root=None: True)
+    local = hero_route.blender_command(False, "check", Path("hero.glb"),
+                                       Path("check/head_front.png"))
+    assert local[local.index("check") + 1] == Path("hero.glb")
+    assert local[local.index("check") + 2] == Path("check")    # the directory, locally
 
 
 def test_the_local_mode_unchanged_by_the_colab_routing():

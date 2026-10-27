@@ -223,6 +223,32 @@ def upscale_command(colab: bool, crop: Path, upscaled: Path, size: int = 1024) -
             "--", "{in}", "{out}", "--size", str(size)]
 
 
+#: The shots the check renders beside its first one (hero_blender names them itself).
+CHECK_SHOTS = ("head_three_quarter.png", "head_side.png", "head_back.png",
+               "body_front.png", "body_three_quarter.png", "body_side.png")
+
+
+def blender_command(remote: bool, sub: str, source: Path, target: Path) -> list[str]:
+    """`hero_blender.py` wherever bpy lives: the local SkinTokens venv when installed,
+    else the rented VM pattern the throwaway rigger uses — the only way a Mac with no
+    local SkinTokens gets a join or a check sheet.
+
+    `target` is the command's one fetched output: the joined GLB for `join`, the check's
+    `head_front.png` for `check` (its directory is the remote output's parent, and the
+    other shots ride `--exec-artifacts`)."""
+    import autorig_api
+
+    if not remote:
+        local_arg = target.parent if sub == "check" else target
+        return [autorig_api.venv_python(), BLENDER, sub, source, local_arg]
+    command = [PYTHON, "-u", COLAB, "--backend", "autorig",
+               "--exec", "scripts/hero_blender.py", "--exec-input", source,
+               "--exec-output", target, "--keep", "--yes"]
+    if sub == "check":
+        command += ["--exec-artifacts", *CHECK_SHOTS]
+    return command + ["--", sub, "{in}", "{out}" if sub != "check" else "{outdir}"]
+
+
 def replay_command(colab: bool, dump: Path, output: Path, faces: int, atlas: int = 2048) -> list[str]:
     """The head clean-up: local post-replay, or the prebuilt binary on the VM (--exec-bin)."""
     from image_to_3dlab import pixal3d_native
@@ -503,8 +529,9 @@ def main() -> int:
     import autorig_api
 
     joined, final = out / "joined.glb", out / "hero.glb"
+    remote_blender = not autorig_api.installed() and autorig_api.colab_ready()
     if run.step("join", joined):
-        run.run([autorig_api.venv_python(), BLENDER, "join", grafted, joined])
+        run.run(blender_command(remote_blender, "join", grafted, joined))
     if run.step("compress textures", final):
         run.run([PYTHON, COMPRESS, joined, final])
 
@@ -512,7 +539,7 @@ def main() -> int:
     stage(run, "check", "Rendering the check sheet")
     check = out / "check"
     if run.step("check sheet", check / "head_front.png"):
-        run.run([autorig_api.venv_python(), BLENDER, "check", final, check])
+        run.run(blender_command(remote_blender, "check", final, check / "head_front.png"))
         shots = [Image.open(check / f"{name}.png").convert("RGB") for name in
                  ("head_front", "head_three_quarter", "head_side", "head_back", "body_front", "body_three_quarter")]
         sheet = Image.new("RGB", (sum(s.width for s in shots), shots[0].height))

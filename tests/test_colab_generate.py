@@ -295,10 +295,13 @@ def test_a_clean_exit_that_forgot_to_say_done_is_recorded(tmp_path):
 
 
 def test_only_pixal3d_declares_artifacts_and_the_others_declare_none():
-    """The other wrappers write nothing Finish needs, so their runs must not go looking."""
+    """Only the wrappers whose side files a later studio step needs may declare any:
+    Pixal3D's record/dump/cameras (Finish's Pixel Match and rerun) and prompt2rig's clip
+    and packed motion (a run's evidence, replayable on any other rig)."""
     assert cg.BACKENDS["pixal3d"]["artifacts"] == (".json", ".post.bin", ".svviews")
+    assert cg.BACKENDS["prompt2rig"]["artifacts"] == (".motion.npz", ".clip.mp4")
     for backend, spec in cg.BACKENDS.items():
-        if backend != "pixal3d":
+        if backend not in ("pixal3d", "prompt2rig"):
             assert not spec.get("artifacts"), f"{backend} declares artifacts it never wrote"
 
 
@@ -469,6 +472,51 @@ def test_exec_bin_mode_skips_the_local_script_check_and_runs_the_binary_raw(
     assert launched["argv"][:2] == ["/content/i2l/vendor/pixal3d-cpp/build/post-replay",
                                     "/content/i2l/inputs/head.post.bin"]
     assert out.read_bytes() == b"GLB"
+
+
+def test_exec_mode_fetches_the_helpers_side_files_and_names_the_output_dir(
+        monkeypatch, tmp_path):
+    """The hero check sheet rides this: the helper writes several shots beside its one
+    declared output, and its command takes the *directory* those land in. The supervisor
+    substitutes {outdir} for that directory and fetches the named side files, skipping
+    quietly the ones the helper chose not to write."""
+    launched: dict = {}
+    downloads: list = []
+
+    def fake_launch(session, backend, argv, output_remote):
+        launched["argv"] = argv
+        launched["out"] = output_remote
+        return "/content/i2l/jobs/1"
+
+    monkeypatch.setattr(cg, "launch_remote_argv", fake_launch)
+    monkeypatch.setattr(cg, "wait_for_remote_job", lambda *a, **k: {"state": "done"})
+    monkeypatch.setattr(cg.colab, "ensure_session", lambda *a, **k: None)
+    monkeypatch.setattr(cg.colab, "stop_idle_sessions", lambda **k: iter(()))
+    monkeypatch.setattr(cg, "ensure_remote_setup", lambda *a, **k: None)
+    monkeypatch.setattr(cg, "sync_tree", lambda *a, **k: None)
+
+    def fake_run(argv, **_kwargs):
+        if argv[0] == "download":
+            downloads.append(argv)
+            Path(argv[2]).write_bytes(b"PNG")   # the CLI writes what it fetched
+        return ""
+
+    monkeypatch.setattr(cg.colab, "run", fake_run)
+
+    model, shot = tmp_path / "hero.glb", tmp_path / "check" / "head_front.png"
+    model.write_bytes(b"GLB")
+    shot.parent.mkdir(parents=True)
+    rc = cg.main(["--backend", "autorig", "--exec", "scripts/hero_blender.py",
+                  "--exec-input", str(model), "--exec-output", str(shot),
+                  "--exec-artifacts", "head_side.png", "body_front.png",
+                  "--keep", "--yes", "--", "check", "{in}", "{outdir}"])
+    assert rc == 0
+    # {outdir} became the remote outputs directory the helper writes its shots into
+    assert launched["argv"][-3:] == ["check", "/content/i2l/inputs/hero.glb",
+                                     "/content/i2l/outputs"]
+    fetched = {Path(argv[1]).name for argv in downloads}
+    assert fetched == {"head_front.png", "head_side.png", "body_front.png"}
+    assert (shot.parent / "head_side.png").read_bytes() == b"PNG"
 
 
 def test_generate_mode_still_requires_image_and_output(capsys):
