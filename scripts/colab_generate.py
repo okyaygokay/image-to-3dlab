@@ -523,37 +523,6 @@ def write_remote_status(session: str, workdir: str, state: str, detail: str) -> 
         pass
 
 
-def copy_hf_token(session: str) -> None:
-    """Carry this machine's Hugging Face token to the VM, for gated repos.
-
-    LTX-2.5's weights sit behind a click-through gate, so its downloads need a token
-    from an account that pressed "Agree and Access" — and nothing on a fresh VM has
-    one. Best effort, and the token itself is never logged: the exec payload is the
-    only thing that ever carries it."""
-    token = (os.environ.get("HF_TOKEN")
-             or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-             or _token_file())
-    if not token:
-        return
-    code = ("import pathlib\n"
-            "path = pathlib.Path('/root/.cache/huggingface/token')\n"
-            "path.parent.mkdir(parents=True, exist_ok=True)\n"
-            f"path.write_text({token.strip()!r})\n")
-    try:
-        colab.run(["exec", "-s", session, "--timeout", "60"], stdin=code, timeout=180)
-        log("Hugging Face token copied to the VM (gated models like LTX-2.5 need it)")
-    except colab.ColabError:
-        log("could not copy the Hugging Face token; gated models may refuse to download")
-
-
-def _token_file() -> str:
-    path = Path.home() / ".cache" / "huggingface" / "token"
-    try:
-        return path.read_text().strip()
-    except OSError:
-        return ""
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -705,7 +674,6 @@ def main(argv: list[str] | None = None) -> int:
         for stale in colab.stop_idle_sessions(log=log):
             log(f"stopped {stale!r}: idle for {colab.human_duration(colab.IDLE_STOP_SECONDS)}")
         colab.ensure_session(config, log=log)
-        copy_hf_token(session)
         colab.run(["exec", "-s", session, "--timeout", "120"], attempts=3,
                   stdin=f"import os; [os.makedirs(p, exist_ok=True) for p in "
                         f"({REMOTE_ROOT + '/inputs'!r}, {REMOTE_ROOT + '/outputs'!r}, "

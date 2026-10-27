@@ -12,10 +12,10 @@ installed by `scripts/bootstrap_prompt2rig_colab.py`. Five stages, all on the VM
    planted on the spot, static camera, ~6 s at 960×544. Motion recovery does not need
    more than that, and the smaller canvas is ~2.3× faster per step than the trained
    768p one. `--video-engine ltx2` swaps in LTX-2.5 distilled — the anti-flicker pick
-   (flicker is what motion recovery turns into shimmer), ~72 GB installed on the VM on
-   first use, gated repo. Two takes by default (`--tries`): the video model rolls a
-   different actor each seed, and a take whose hands track badly or whose feet wander
-   is thrown away.
+   (flicker is what motion recovery turns into shimmer), ~71 GB installed on the VM on
+   first use, from an ungated ModelScope mirror of the weights. Two takes by default
+   (`--tries`): the video model rolls a different actor each seed, and a take whose
+   hands track badly or whose feet wander is thrown away.
 2. **Body motion** — GVHMR lifts SMPL-X motion from the clip (a generated clip has a
    static camera, which is its `-s` fast path).
 3. **Fingers** — WiLoR (or MediaPipe) tracks the hands on the full-rate clip, in parallel
@@ -153,14 +153,15 @@ def generate_clip(prompt: str, seconds: float, seed: int, out: Path,
 
 
 def ensure_ltx2() -> None:
-    """The LTX-2.5 engine installs on demand: its own venv and ~72 GB of weights that a
-    VM only pays for when a run actually asks for the engine. The marker is the
+    """The LTX-2.5 engine installs on demand: its own venv and ~71 GB of weights that a
+    VM only pays for when a run actually asks for the engine. The weights come from
+    ModelScope's ungated mirror, so no token or account is needed. The marker is the
     bootstrap's own, so both routes agree on what "installed" means."""
     marker = REPO / "vendor" / "prompt2rig-driver" / ".ltx2-done"
     if marker.is_file():
         return
-    log("video: installing LTX-2.5 on this VM first (one time, about 72 GB — "
-        "a gated repo, so a Hugging Face token must already be on the VM)")
+    log("video: installing LTX-2.5 on this VM first (one time, about 71 GB, from "
+        "ModelScope's ungated mirror of the weights)")
     run([sys.executable, REPO / "scripts" / "bootstrap_prompt2rig_colab.py",
          "--yes", "--ltx2-only"], what="ltx2 install")
 
@@ -298,7 +299,7 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
                         help="how many takes to act out; the best-scoring one is kept")
     parser.add_argument("--video-engine", choices=("h3", "ltx2"), default="h3",
                         help="Who acts the prompt out: MiniMax H3 (default) or LTX-2.5 "
-                             "distilled (the anti-flicker pick; installs ~72 GB on the "
+                             "distilled (the anti-flicker pick; installs ~71 GB on the "
                              "VM on first use)")
     parser.add_argument("--arm-spread", type=float, default=0.0)
     parser.add_argument("--speed", type=float, default=1.0)

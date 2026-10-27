@@ -69,18 +69,33 @@ SMPLX_FILE = "human_models/human_model_files/models_smplx_v1_1/smplx/SMPLX_NEUTR
 #: the anti-flicker pick — its pitch is temporal stability in high-motion shots, and
 #: flicker is what motion recovery turns into shimmer. It needs diffusers *main*
 #: (LTX2Pipeline is not in a release), so it gets its own venv rather than gambling
-#: the H3 one on an upgrade. The weights repo is click-through gated: the VM needs a
-#: token from an account that pressed "Agree and Access" (the supervisor copies this
-#: machine's token over when it can find one).
-LTX2_REPO, LTX2_REVISION = "Lightricks/LTX-2.5-Diffusers", \
-    "4791a1100e0cf97f7ed5c55c12dd71dce13f9dd3"
+#: the H3 one on an upgrade. The weights come from ModelScope's mirror of the
+#: Diffusers pack: the Hugging Face original is click-through gated and wants an
+#: account's token, the mirror is ungated — no account, no token, no click.
+LTX2_MS_MODEL, LTX2_MS_REVISION = "Lightricks/LTX-2.5-Diffusers", \
+    "72d538df36d92956d682557f39409d3d072626d8"
 LTX2_VENV = REPO / "vendor" / "ltx2" / ".venv"
 LTX2_MODEL = REPO / "vendor" / "ltx2" / "model"
-#: What `--exclude transformer_full/*` leaves: the distilled transformer, the Gemma 4
-#: text encoder, the conv VAE and the audio stack `model_index.json` insists on.
-LTX2_GB = 72.0
+#: What `model_index.json` actually loads and nothing else. The mirror carries the
+#: whole 174 GB repo, and four loads of freight the pipeline never reads:
+#: `transformer_full/` (the un-distilled base DiT, 38 GB), a second copy of the
+#: distilled transformer re-sharded eight ways (38 GB — the index names the four-shard
+#: set), `connectors/`' unsharded single-file duplicate (6.3 GB — its index names the
+#: shards), and `prompt_enhancer/` + `processor/` (10.2 GB — optional components whose
+#: job, rewriting short prompts into long captions, this chain does itself in
+#: `ltx_motion_prompt`; the generator passes them as None so nothing looks for them).
+#: The two latent upsamplers and the root LoRA are not in `model_index.json` at all.
+LTX2_INCLUDE = [
+    "model_index.json",
+    "transformer/*.json", "transformer/*-of-00004.safetensors",
+    "text_encoder/*", "tokenizer/*", "scheduler/*",
+    "connectors/*.json", "connectors/*-of-00002.safetensors",
+    "vae/*", "audio_vae/*", "diffusion_decoder/*", "duration_head/*", "vocoder/*",
+]
+LTX2_GB = 71.0
 DIFFUSERS_MAIN_COMMIT = "06a9cfb86ae8aa69c6a220ba0da0f37b819dde6a"
 LTX2_TRANSFORMERS, LTX2_ACCELERATE = "5.21.0", "1.15.0"
+MODELSCOPE_VERSION = "1.40.2"
 LTX2_LICENCE = (
     "LTX-2.5: LTX-2.x Community License — free including commercial use under\n"
     "  $10M annual revenue, no mandatory branding; above that, a paid agreement with\n"
@@ -344,32 +359,19 @@ def require_cu128_driver() -> None:
         raise SystemExit(f"cannot install a torch venv here: {why}")
 
 
-def gated_help(repo: str) -> str:
-    return (f"\nHugging Face refused {repo}: it is gated (a click-through, not a wait).\n"
-            f"  1. Sign in and press \"Agree and Access\" at\n"
-            f"     https://huggingface.co/{repo}\n"
-            "  2. Give the lab a token from that account: the supervisor copies\n"
-            "     HF_TOKEN or ~/.cache/huggingface/token to the VM, so\n"
-            "     `hf auth login` on this machine once is the easy way\n"
-            "  3. Run this again. Nothing was downloaded for it.")
+def modelscope() -> str:
+    """The driver venv's `modelscope` command — not on PATH, so it is addressed
+    directly. Installed on demand: only the LTX-2.5 download needs it."""
+    return str(driver_python().parent / "modelscope")
 
 
 def ensure_ltx2() -> None:
     """The alternate video engine (LTX-2.5 distilled): its own venv, because LTX2Pipeline
     lives in diffusers main and gambling the H3 venv on an upgrade would put two moving
-    targets in one environment. Its own marker, so a VM only pays the ~72 GB when a run
+    targets in one environment. Its own marker, so a VM only pays the ~71 GB when a run
     actually asks for `--video-engine ltx2`."""
     if marker("ltx2").is_file():
         return
-    # Access first, before anything is built or downloaded: a gated refusal with 72 GB
-    # half-fetched behind it is the expensive way to learn about the click-through.
-    access = subprocess.run(
-        [hf(), "download", LTX2_REPO, "README.md", "--revision", LTX2_REVISION,
-         "--local-dir", str(DRIVER / "gate-check")],
-        capture_output=True, text=True, timeout=600, check=False)
-    if access.returncode != 0:
-        print((access.stderr or access.stdout)[-800:], file=sys.stderr, flush=True)
-        raise SystemExit(gated_help(LTX2_REPO))
     free_gb = shutil.disk_usage(str(REPO)).free / 1e9
     if free_gb < LTX2_GB + 10:
         raise SystemExit(
@@ -378,6 +380,9 @@ def ensure_ltx2() -> None:
     require_cu128_driver()
     index = host.TORCH_INDEX + "cu128"
     LTX2_VENV.parent.mkdir(parents=True, exist_ok=True)
+    must(["uv", "pip", "install", "--python", str(driver_python()),
+          f"modelscope=={MODELSCOPE_VERSION}"],
+         what="installing the modelscope CLI for the LTX-2.5 download", timeout=1200)
     must(["uv", "venv", "--python", PYTHON_VERSION, "--seed", "--clear", str(LTX2_VENV)],
          what="creating the ltx2 venv", timeout=1200)
     must(["uv", "pip", "install", "--python", str(ltx2_venv_python()), "--index-url", index,
@@ -387,10 +392,10 @@ def ensure_ltx2() -> None:
           f"diffusers @ git+https://github.com/huggingface/diffusers@{DIFFUSERS_MAIN_COMMIT}",
           f"transformers=={LTX2_TRANSFORMERS}", f"accelerate=={LTX2_ACCELERATE}"],
          what="installing diffusers main for ltx2", timeout=3600)
-    print(f"downloading LTX-2.5 ({LTX2_GB:.0f} GB, one time on this VM; gated repo, "
-          f"pinned revision {LTX2_REVISION[:8]})", flush=True)
-    must([hf(), "download", LTX2_REPO, "--revision", LTX2_REVISION,
-          "--exclude", "transformer_full/*", "--local-dir", str(LTX2_MODEL)],
+    print(f"downloading LTX-2.5 ({LTX2_GB:.0f} GB, one time on this VM) from ModelScope "
+          f"(ungated mirror; pinned revision {LTX2_MS_REVISION[:8]})", flush=True)
+    must([modelscope(), "download", LTX2_MS_MODEL, "--revision", LTX2_MS_REVISION,
+          "--include", *LTX2_INCLUDE, "--local_dir", str(LTX2_MODEL)],
          what="downloading LTX-2.5", timeout=14400)
     marker("ltx2").write_text("ok")
 
@@ -404,9 +409,12 @@ def announcement(*, ltx2: bool = False) -> str:
             "  route:   this rented Colab VM, into vendor/ltx2/",
             (f"  size:    about 8 GB of packages (CUDA torch, cu128 on a G4) and"
             f" {LTX2_GB:.0f} GB of weights that stay on disk"),
-            "  source:  Lightricks/LTX-2.5-Diffusers at a pinned revision (the distilled",
-            "           pack, transformer_full excluded); diffusers main at commit",
-            f"           {DIFFUSERS_MAIN_COMMIT[:8]}, because LTX-2.5 is not in a release",
+            "  source:  ModelScope's ungated mirror of Lightricks/LTX-2.5-Diffusers,",
+            f"           pinned at revision {LTX2_MS_REVISION[:8]} — the Hugging Face",
+            "           original is click-through gated, the mirror needs no account;",
+            "           only what model_index.json loads, ~71 of the mirror's 174 GB;",
+            f"           diffusers main at commit {DIFFUSERS_MAIN_COMMIT[:8]}, because",
+            "           LTX-2.5 is not in a release",
             f"  licence: {LTX2_LICENCE}",
             "",
         ])
@@ -426,7 +434,7 @@ def announcement(*, ltx2: bool = False) -> str:
         "           application); GVHMR, WiLoR, SMPL-X and MANO are research-only — the",
         "           viewer writes all of this into every clip's provenance record",
         "  optional: the LTX-2.5 video engine installs on demand (--video-engine ltx2,",
-        f"            ~{LTX2_GB:.0f} GB more, gated repo)",
+        f"            ~{LTX2_GB:.0f} GB more, from an ungated ModelScope mirror)",
         "",
     ])
 

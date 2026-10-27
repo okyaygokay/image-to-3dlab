@@ -27,7 +27,8 @@ def test_announcement_names_backend_licence_and_size():
 def test_every_pin_is_a_full_checksum_or_revision():
     for name, value in (("H3_REVISION", bp.H3_REVISION), ("SMPLX_REVISION", bp.SMPLX_REVISION),
                         ("WILOR_REVISION", bp.WILOR_REVISION),
-                        ("WILOR_MINI_COMMIT", bp.WILOR_MINI_COMMIT)):
+                        ("WILOR_MINI_COMMIT", bp.WILOR_MINI_COMMIT),
+                        ("LTX2_MS_REVISION", bp.LTX2_MS_REVISION)):
         assert len(getattr(bp, name)) == 40 and all(c in "0123456789abcdef" for c in value)
     assert len(bp.SMPLX_SHA256) == 64
     for name, sha in bp.WILOR_SHA256.items():
@@ -148,3 +149,54 @@ def test_torch_comes_from_the_pins_own_index_before_the_rest(monkeypatch):
     assert bp.TORCHVISION_VERSION == "0.25.0"
     installs = [line for line in source.splitlines() if '"uv", "pip", "install"' in line]
     assert installs, "the venv must actually install something"
+
+
+def test_the_ltx2_announcement_names_the_mirror_and_its_terms():
+    text = bp.announcement(ltx2=True)
+    assert "ModelScope" in text and "ungated" in text and "no account" in text
+    assert "LTX-2.5-Diffusers" in text and "Community License" in text
+    assert f"{bp.LTX2_MS_REVISION[:8]}" in text          # the pin, in the promise
+
+
+def test_ltx2s_include_list_downloads_only_what_model_index_loads():
+    """The ModelScope mirror carries the whole 174 GB repo, and four loads of freight
+    in it are things the pipeline never reads: the un-distilled base DiT, the distilled
+    transformer's re-sharded second copy (the index names the four-shard set), the
+    connectors' unsharded duplicate, and the prompt-enhancer pair — optional components
+    whose job this chain does itself in `ltx_motion_prompt`."""
+    flat = " ".join(bp.LTX2_INCLUDE)
+    for never in ("transformer_full", "of-00008", "prompt_enhancer", "processor",
+                  "latent_upsampler", "lora", "modular"):
+        assert never not in flat, never
+    for part in ("transformer", "text_encoder", "tokenizer", "scheduler", "connectors",
+                 "vae", "audio_vae", "diffusion_decoder", "duration_head", "vocoder"):
+        assert any(p.startswith(f"{part}/") for p in bp.LTX2_INCLUDE), part
+    assert "model_index.json" in bp.LTX2_INCLUDE
+    assert "transformer/*-of-00004.safetensors" in bp.LTX2_INCLUDE
+
+
+def test_ltx2_installs_through_the_modelscope_cli_at_a_pinned_revision(monkeypatch, tmp_path):
+    """The Hugging Face original is click-through gated; the ModelScope mirror needs no
+    account and no token, so the install asks for none — but the mirror's commit is
+    still pinned, because an unpinned mirror can change under a pinned run."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(bp, "DRIVER", tmp_path)
+    monkeypatch.setattr(bp, "LTX2_VENV", tmp_path / "ltx2" / ".venv")
+    monkeypatch.setattr(bp, "LTX2_MODEL", tmp_path / "model")
+    monkeypatch.setattr(bp.shutil, "disk_usage", lambda _p: SimpleNamespace(free=500e9))
+    monkeypatch.setattr(bp, "require_cu128_driver", lambda: None)
+    commands: list = []
+    monkeypatch.setattr(bp, "must", lambda command, *, what, timeout: commands.append(command))
+    bp.ensure_ltx2()
+    # the driver venv gains the one CLI this download needs, pinned like everything else
+    installs = [c for c in commands if c[:2] == ["uv", "pip"]]
+    assert any(c[-1] == f"modelscope=={bp.MODELSCOPE_VERSION}" for c in installs)
+    # and the fetch itself is the modelscope CLI, pinned, positive include list
+    download = commands[-1]
+    assert download[0].endswith("bin/modelscope")
+    assert download[1:5] == ["download", bp.LTX2_MS_MODEL,
+                             "--revision", bp.LTX2_MS_REVISION]
+    assert download[5] == "--include" and download[6:-2] == list(bp.LTX2_INCLUDE)
+    assert download[-2:] == ["--local_dir", str(tmp_path / "model")]
+    assert (tmp_path / ".ltx2-done").is_file()          # idempotence marker written

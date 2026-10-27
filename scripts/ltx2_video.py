@@ -53,7 +53,12 @@ def generate(prompt: str, out: Path, seconds: float, seed: int,
     frames = snapped_frames(seconds)
     print(f"ltx2: {frames} frames ({frames / FPS:.1f}s) at {width}x{height}, seed {seed}",
           flush=True)
-    pipe = LTX2Pipeline.from_pretrained(str(model_dir), dtype=torch.bfloat16)
+    # The prompt-enhancer pair is optional and deliberately absent (the bootstrap skips
+    # its 10 GB): this chain writes its own long captions, and passing None keeps
+    # from_pretrained from looking for folders that are not there. With no enhancer the
+    # pipeline would fall back to the text encoder anyway — and only when asked.
+    pipe = LTX2Pipeline.from_pretrained(str(model_dir), dtype=torch.bfloat16,
+                                        prompt_enhancer=None, processor=None)
     pipe.enable_model_cpu_offload()
     call = {
         "prompt": prompt, "negative_prompt": DEFAULT_NEGATIVE_PROMPT,
