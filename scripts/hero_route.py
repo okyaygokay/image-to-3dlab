@@ -272,6 +272,23 @@ def head_cleanup(run: Run, raw: Path, out: Path, faces: int, colab: bool = False
     out.write_bytes(native.convert_replay_glb(replay.read_bytes()))
 
 
+def stage_body_inputs(body: Path, views: Path | None, dump: Path | None, record: Path | None,
+                      body_raw: Path) -> None:
+    """Bring an existing model in as the body, with whatever artifacts its run saved.
+
+    Every artifact is optional -- None is a body from another engine (a Hi3D mesh has no
+    cameras, no clean-up dump, no record), and the route finishes it the classic way. The
+    first live run of that path died copying a None -- hence a helper, and a test.
+    """
+    if views is not None:
+        shutil.copytree(views, body_raw.with_suffix(".svviews"), dirs_exist_ok=True)
+    if dump and dump.is_file():
+        shutil.copy(dump, body_raw.with_suffix(".post.bin"))
+    if record and record.is_file():
+        shutil.copy(record, body_raw.with_suffix(".json"))
+    shutil.copy(body, body_raw)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("picture", type=Path)
@@ -344,12 +361,7 @@ def main() -> int:
     stage(run, "body", "Building the body" if not args.body else "Finishing the body")
     if args.body and not body_raw.exists():
         # The studio's own 3D model of this picture: no second Pixal3D run for the body.
-        shutil.copytree(args.body_views, body_raw.with_suffix(".svviews"), dirs_exist_ok=True)
-        if args.body_dump and args.body_dump.is_file():
-            shutil.copy(args.body_dump, body_raw.with_suffix(".post.bin"))
-        if args.body_record and args.body_record.is_file():
-            shutil.copy(args.body_record, body_raw.with_suffix(".json"))
-        shutil.copy(args.body, body_raw)
+        stage_body_inputs(args.body, args.body_views, args.body_dump, args.body_record, body_raw)
         run.say(f"body: using {args.body}")
     if run.step("body: Pixal3D", body_raw):
         run.run(pixal_command(colab, picture, body_raw, "--seed", str(args.seed),

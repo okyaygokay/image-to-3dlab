@@ -209,3 +209,24 @@ def test_needed_parts_in_colab_mode_drops_the_model_parts(monkeypatch, tmp_path)
         "Pixal3D's own clean-up (Setup: Rebuild Pixal3D)",
     }
     assert hero_route.missing_parts(colab) == []
+
+
+def test_a_foreign_body_stages_with_no_artifacts_at_all(tmp_path):
+    """A Hi3D body arrives as --body with no --body-views/--body-dump/--body-record: staging
+    it must copy the mesh and skip the rest, not die on a None (the first live run did)."""
+    body = tmp_path / "model.glb"
+    body.write_bytes(b"glb")
+    views = tmp_path / "model.svviews"
+    views.mkdir()
+    (views / "transforms.json").write_text("{}")
+    dump = tmp_path / "model.post.bin"
+    dump.write_bytes(b"dump")
+
+    hero_route.stage_body_inputs(body, None, None, None, tmp_path / "body_raw.glb")
+    raw = tmp_path / "body_raw.glb"
+    assert raw.read_bytes() == b"glb"
+    assert not raw.with_suffix(".svviews").exists() and not raw.with_suffix(".post.bin").exists()
+
+    hero_route.stage_body_inputs(body, views, dump, None, raw)
+    assert (raw.with_suffix(".svviews") / "transforms.json").is_file()
+    assert raw.with_suffix(".post.bin").read_bytes() == b"dump"
