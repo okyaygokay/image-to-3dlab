@@ -192,11 +192,46 @@ def test_ltx2_installs_through_the_modelscope_cli_at_a_pinned_revision(monkeypat
     # the driver venv gains the one CLI this download needs, pinned like everything else
     installs = [c for c in commands if c[:2] == ["uv", "pip"]]
     assert any(c[-1] == f"modelscope=={bp.MODELSCOPE_VERSION}" for c in installs)
+    # the venv carries PyAV: the I2V path re-compresses the conditioning frame as H.264
+    # and refuses to run without it (found on the first live run)
+    assert any(f"av=={bp.AV_VERSION}" in c for c in installs)
     # and the fetch itself is the modelscope CLI, pinned, positive include list
-    download = commands[-1]
+    # (it runs before the venv commands: weights first, so a failed venv build does
+    # not re-trigger the weights pass)
+    (download,) = [c for c in commands if len(c) > 1 and c[1] == "download"]
     assert download[0].endswith("bin/modelscope")
     assert download[1:5] == ["download", bp.LTX2_MS_MODEL,
                              "--revision", bp.LTX2_MS_REVISION]
     assert download[5] == "--include" and download[6:-2] == list(bp.LTX2_INCLUDE)
     assert download[-2:] == ["--local_dir", str(tmp_path / "model")]
-    assert (tmp_path / ".ltx2-done").is_file()          # idempotence marker written
+    assert bp.marker("ltx2").read_text() == bp.LTX2_BUILD
+    assert bp.marker("ltx2-weights").read_text() == bp.LTX2_MS_REVISION
+
+
+def test_a_warm_ltx2_vm_pays_for_nothing_twice(monkeypatch, tmp_path):
+    """Two markers split the install: the build one for the venv, the revision one for
+    the weights. A VM current on both runs nothing at all; a VM warm on an older build
+    rebuilds only the venv, never re-fetching the 71 GB."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(bp, "DRIVER", tmp_path)
+    monkeypatch.setattr(bp, "LTX2_VENV", tmp_path / "ltx2" / ".venv")
+    monkeypatch.setattr(bp.shutil, "disk_usage", lambda _p: SimpleNamespace(free=500e9))
+    monkeypatch.setattr(bp, "require_cu128_driver", lambda: None)
+    bp.marker("ltx2").write_text(bp.LTX2_BUILD)
+    bp.marker("ltx2-weights").write_text(bp.LTX2_MS_REVISION)
+
+    def fail(*args, **kwargs):
+        raise AssertionError("a warm VM must not install again")
+
+    monkeypatch.setattr(bp, "must", fail)
+    bp.ensure_ltx2()
+
+    # an older build marker (the unversioned first write): venv again, weights never
+    commands: list = []
+    monkeypatch.setattr(bp, "must", lambda command, *, what, timeout: commands.append(command))
+    bp.marker("ltx2").write_text("ok")
+    bp.ensure_ltx2()
+    assert [c for c in commands if len(c) > 1 and c[1] == "download"] == []
+    assert any(c[:2] == ["uv", "venv"] for c in commands)
+    assert bp.marker("ltx2").read_text() == bp.LTX2_BUILD

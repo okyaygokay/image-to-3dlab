@@ -155,10 +155,13 @@ def generate_clip(prompt: str, seconds: float, seed: int, out: Path,
 def ensure_ltx2() -> None:
     """The LTX-2.5 engine installs on demand: its own venv and ~71 GB of weights that a
     VM only pays for when a run actually asks for the engine. The weights come from
-    ModelScope's ungated mirror, so no token or account is needed. The marker is the
-    bootstrap's own, so both routes agree on what "installed" means."""
+    ModelScope's ungated mirror, so no token or account is needed. The marker carries
+    the bootstrap's build id, so a VM warm on an older build re-runs the install and
+    picks up what changed (a venv package, say) without re-downloading the weights."""
+    import bootstrap_prompt2rig_colab as bootstrap
+
     marker = REPO / "vendor" / "prompt2rig-driver" / ".ltx2-done"
-    if marker.is_file():
+    if marker.is_file() and marker.read_text() == bootstrap.LTX2_BUILD:
         return
     log("video: installing LTX-2.5 on this VM first (one time, about 71 GB, from "
         "ModelScope's ungated mirror of the weights)")

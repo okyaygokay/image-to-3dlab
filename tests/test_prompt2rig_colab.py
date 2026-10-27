@@ -158,8 +158,12 @@ def test_the_video_engine_picks_who_acts_the_prompt_out(monkeypatch, tmp_path):
 
 
 def test_ltx2_installs_on_demand_once(monkeypatch, tmp_path):
-    """The engine's ~72 GB is paid only when a run asks for it, and once per VM: the
-    marker is the bootstrap's own, so the two routes agree on what "installed" means."""
+    """The engine's ~71 GB is paid only when a run asks for it, and once per VM: the
+    marker carries the bootstrap's build id, so both routes agree on what "installed"
+    means — and a VM warm on an older build re-runs the install instead of trusting a
+    marker that predates the change."""
+    import bootstrap_prompt2rig_colab as bp
+
     monkeypatch.setattr(p2r, "REPO", tmp_path)
     driver = tmp_path / "vendor" / "prompt2rig-driver"
     driver.mkdir(parents=True)
@@ -172,10 +176,14 @@ def test_ltx2_installs_on_demand_once(monkeypatch, tmp_path):
     p2r.ensure_ltx2()
     assert commands[0][1].endswith("bootstrap_prompt2rig_colab.py")
     assert commands[0][-2:] == ["--yes", "--ltx2-only"]
-    (driver / ".ltx2-done").write_text("ok")
+    (driver / ".ltx2-done").write_text(bp.LTX2_BUILD)
     commands.clear()
     p2r.ensure_ltx2()
     assert commands == []
+    # a marker from an older build is not "installed" — the install runs again
+    (driver / ".ltx2-done").write_text("ok")
+    p2r.ensure_ltx2()
+    assert len(commands) == 1
 
 
 def test_the_video_engine_flag_parses():

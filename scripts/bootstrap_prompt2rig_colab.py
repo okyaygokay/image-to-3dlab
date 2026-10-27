@@ -96,6 +96,14 @@ LTX2_GB = 71.0
 DIFFUSERS_MAIN_COMMIT = "06a9cfb86ae8aa69c6a220ba0da0f37b819dde6a"
 LTX2_TRANSFORMERS, LTX2_ACCELERATE = "5.21.0", "1.15.0"
 MODELSCOPE_VERSION = "1.40.2"
+#: PyAV: the I2V pipeline re-compresses the conditioning frame as H.264 before feeding
+#: it (training-matched CRF conditioning, the model's own default) and refuses to run
+#: without it — found on the first live run.
+AV_VERSION = "19.0.2"
+#: The ltx2 venv's build id, bumped whenever its package set changes: a VM warm on an
+#: older build re-runs the venv step (minutes) without re-paying the weights, whose own
+#: marker carries the revision. Build 2 added PyAV; build 1 was the unversioned "ok".
+LTX2_BUILD = "2"
 LTX2_LICENCE = (
     "LTX-2.5: LTX-2.x Community License — free including commercial use under\n"
     "  $10M annual revenue, no mandatory branding; above that, a paid agreement with\n"
@@ -368,9 +376,12 @@ def modelscope() -> str:
 def ensure_ltx2() -> None:
     """The alternate video engine (LTX-2.5 distilled): its own venv, because LTX2Pipeline
     lives in diffusers main and gambling the H3 venv on an upgrade would put two moving
-    targets in one environment. Its own marker, so a VM only pays the ~71 GB when a run
+    targets in one environment. Two markers split the cost: the build one says the venv
+    matches this script's package set, the weights one (carrying the revision) says the
+    ~71 GB are on disk — a warm VM re-pays neither, a build bump re-pays only the venv,
+    a revision bump re-verifies only the weights. Nothing runs at all unless a run
     actually asks for `--video-engine ltx2`."""
-    if marker("ltx2").is_file():
+    if marker("ltx2").is_file() and marker("ltx2").read_text() == LTX2_BUILD:
         return
     free_gb = shutil.disk_usage(str(REPO)).free / 1e9
     if free_gb < LTX2_GB + 10:
@@ -383,6 +394,15 @@ def ensure_ltx2() -> None:
     must(["uv", "pip", "install", "--python", str(driver_python()),
           f"modelscope=={MODELSCOPE_VERSION}"],
          what="installing the modelscope CLI for the LTX-2.5 download", timeout=1200)
+    # Weights before venv: a venv build that fails must not re-trigger the weights pass.
+    weights = marker("ltx2-weights")
+    if not (weights.is_file() and weights.read_text() == LTX2_MS_REVISION):
+        print(f"downloading LTX-2.5 ({LTX2_GB:.0f} GB, one time on this VM) from ModelScope "
+              f"(ungated mirror; pinned revision {LTX2_MS_REVISION[:8]})", flush=True)
+        must([modelscope(), "download", LTX2_MS_MODEL, "--revision", LTX2_MS_REVISION,
+              "--include", *LTX2_INCLUDE, "--local_dir", str(LTX2_MODEL)],
+             what="downloading LTX-2.5", timeout=14400)
+        weights.write_text(LTX2_MS_REVISION)
     must(["uv", "venv", "--python", PYTHON_VERSION, "--seed", "--clear", str(LTX2_VENV)],
          what="creating the ltx2 venv", timeout=1200)
     must(["uv", "pip", "install", "--python", str(ltx2_venv_python()), "--index-url", index,
@@ -390,14 +410,10 @@ def ensure_ltx2() -> None:
          what=f"installing torch {TORCH_VERSION} for ltx2", timeout=7200)
     must(["uv", "pip", "install", "--python", str(ltx2_venv_python()),
           f"diffusers @ git+https://github.com/huggingface/diffusers@{DIFFUSERS_MAIN_COMMIT}",
-          f"transformers=={LTX2_TRANSFORMERS}", f"accelerate=={LTX2_ACCELERATE}"],
+          f"transformers=={LTX2_TRANSFORMERS}", f"accelerate=={LTX2_ACCELERATE}",
+          f"av=={AV_VERSION}"],
          what="installing diffusers main for ltx2", timeout=3600)
-    print(f"downloading LTX-2.5 ({LTX2_GB:.0f} GB, one time on this VM) from ModelScope "
-          f"(ungated mirror; pinned revision {LTX2_MS_REVISION[:8]})", flush=True)
-    must([modelscope(), "download", LTX2_MS_MODEL, "--revision", LTX2_MS_REVISION,
-          "--include", *LTX2_INCLUDE, "--local_dir", str(LTX2_MODEL)],
-         what="downloading LTX-2.5", timeout=14400)
-    marker("ltx2").write_text("ok")
+    marker("ltx2").write_text(LTX2_BUILD)
 
 
 def announcement(*, ltx2: bool = False) -> str:
