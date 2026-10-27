@@ -101,12 +101,15 @@ LTX2_TRANSFORMERS, LTX2_ACCELERATE = "5.21.0", "1.15.0"
 MODELSCOPE_VERSION = "1.40.2"
 #: PyAV: the I2V pipeline re-compresses the conditioning frame as H.264 before feeding
 #: it (training-matched CRF conditioning, the model's own default) and refuses to run
-#: without it — found on the first live run.
-AV_VERSION = "19.0.2"
+#: without it — found on the first live run. 18.1.0 is the newest release that still
+#: supports the Python this venv pins (19.x wants 3.12+).
+AV_VERSION = "18.1.0"
 #: The ltx2 venv's build id, bumped whenever its package set changes: a VM warm on an
 #: older build re-runs the venv step (minutes) without re-paying the weights, whose own
-#: marker carries the revision. Build 2 added PyAV; build 1 was the unversioned "ok".
-LTX2_BUILD = "2"
+#: marker carries the revision. Build 3 fixed the PyAV pin's Python floor; build 2 was
+#: the av==19 attempt that could never resolve on Python 3.11; build 1 was the
+#: unversioned "ok".
+LTX2_BUILD = "3"
 LTX2_LICENCE = (
     "LTX-2.5: LTX-2.x Community License — free including commercial use under\n"
     "  $10M annual revenue, no mandatory branding; above that, a paid agreement with\n"
