@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **LTX-2.5 as the acting engine for described motions (`--video-engine ltx2`).** The
+  chain's videos flickered, and flicker is what motion recovery turns into shimmer and
+  broken-looking hands. LTX-2.5 distilled (8 sigma steps, all guidance off, driven per
+  its model card) is the anti-flicker pick; it runs in its own venv (diffusers main,
+  pinned by commit — LTX2Pipeline is not in a release) and its ~72 GB of weights install
+  on the VM **on demand**, only when a run first asks for the engine. The weights repo is
+  click-through gated: agree once on the model page, `hf auth login` locally, and the
+  supervisor carries the token to the VM (never into any log). Licence is the friendly
+  one — LTX-2.x Community License: free including commercial use under $10M revenue, no
+  mandatory branding. H3 stays the default until the A/B says otherwise.
 - **One warm Colab VM for the whole lab, with the other backends installing onto it while
   a job runs.** Every step's next click used to pay the same 15–30 minute VM install the
   last one did. Jobs now land on one shared session (`i2l-lab`), started by the first job
@@ -50,6 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `move_description` advanced choice. See [docs/colab-gpu.md](docs/colab-gpu.md).
 
 ### Fixed
+- **Mitten hands stop flapping.** A rig whose hands have no finger chains (SkinTokens
+  gives the hero model two stub bones per hand) used to copy SOMA's middle finger onto
+  those stubs, so the whole mitten flapped with the hand tracker's frame-to-frame noise
+  — the exact "fingers/hands broken" look. A partial hand now holds rigid with its hand
+  bone (a mitten cannot articulate anyway), and the cleaner gives the 48 finger bones a
+  wider smoothing pass of their own, reported as `finger_before/after` in every run.
 - **Big artifacts come back from the VM in pieces, checksummed — and one that exists but
   will not cross the link fails the run at the fetch, named.** Found live: a hero head's
   ~460 MB clean-up dump failed every one-piece download attempt (twenty minutes after a

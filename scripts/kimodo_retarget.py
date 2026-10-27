@@ -248,11 +248,14 @@ def map_skintokens_to_soma(parents: dict[str, str | None], heads: dict[str, np.n
         m.update(_spread(ch, [f"{lr}Shoulder", f"{lr}Arm", f"{lr}ForeArm", f"{lr}Hand"]))
         hand = ch[-1]
         fingers = [past_hand] if past_hand else [_chain(c, kids) for c in kids[hand]]
-        # SkinTokens leaves fingers out for mitten-like hands (a mech: 22 bones, not 52).
-        # Anything short of a full hand moves stiffly with SOMA's middle finger.
+        # SkinTokens leaves fingers out for mitten-like hands (a mech: 22 bones; the
+        # hero rig: two stub bones per hand). A mitten cannot articulate, so its stubs
+        # hold rigid with the hand: following SOMA's middle finger made the whole
+        # mitten flap with the hand tracker's frame-to-frame noise — the exact
+        # "fingers broken" look, found on the hero rig.
         if len(fingers) != 5:
             for fch in fingers:
-                m.update(_spread(fch, [f"{lr}HandMiddle{i}" for i in (2, 3, 4)]))
+                m.update({b: f"{lr}Hand" for b in fch})
             continue
         # Thumb: the chain rooted nearest the wrist. The rest run front to back.
         thumb = min(fingers, key=lambda f: np.linalg.norm(heads[f[0]] - heads[hand]))

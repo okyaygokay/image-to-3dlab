@@ -135,8 +135,11 @@ def test_torch_comes_from_the_pins_own_index_before_the_rest(monkeypatch):
     and only then the packages that must not re-resolve it."""
     import inspect
 
+    # The cu128 floor check lives in one helper both torch venvs call (the ltx2 engine
+    # pays the same floor); the install itself stays first, alone, from the pin's index.
     source = inspect.getsource(bp.ensure_venv)
-    assert "driver_cuda_version" in source
+    assert "require_cu128_driver()" in source
+    assert "driver_cuda_version" in inspect.getsource(bp.require_cu128_driver)
     assert "torch_cuda_index" not in source         # the driver's newest build is the wrong ask
     assert 'host.TORCH_INDEX + "cu128"' in source   # the pin's own newest CUDA build
     # diffusers 0.42's loaders import ScalingType, which torch first carries at 2.10 —

@@ -23,6 +23,10 @@ the three fixes work without touching the retargeter:
   triangular window and re-orthonormalised (SVD), which averages rotations safely.
   Frame 0 is never smoothed: `joints0` is frame 0's posed joints, and the pair must
   stay consistent or the rest pose recovered from them drifts.
+* **Fingers** — 48 of the 77 joints are finger bones, and the hand tracker's per-frame
+  noise lands there, playing as broken fingers. They get a second, wider smoothing pass
+  of their own: a third of a second of lag is invisible on a working hand, and it kills
+  the flicker.
 
 Every step reports numbers (planted-foot drift, floor wander, shimmer energy) before
 and after, so quality is a measurement, not an opinion.
@@ -61,6 +65,29 @@ CONTACT_SPEED = 0.35
 TRAVEL_METRES = 0.50
 #: Smoothing widths: the root correction narrower than the floor correction.
 DRIFT_SIGMA, FLOOR_SIGMA, ROTATION_WINDOW = 0.10, 0.75, 5
+#: Fingers get a second, wider pass of their own: 48 of the 77 joints are finger bones,
+#: WiLoR's per-frame keypoint noise lands there, and it plays on the rig as broken
+#: fingers — curling and flicking faster than a real hand ever moves. Fingers do not
+#: need 30 Hz; a third of a second of lag is invisible on them and kills the flicker.
+FINGER_WINDOW = 11
+
+
+def finger_set() -> list[int]:
+    """The SOMA joints below either wrist — every descendant of LeftHand/RightHand."""
+    out: list[int] = []
+    for hand in ("LeftHand", "RightHand"):
+        frontier = [SOMA_INDEX[hand]]
+        while frontier:
+            joint = frontier.pop()
+            for child, parent in enumerate(SOMA77_PARENTS):
+                if parent == joint:
+                    out.append(child)
+                    frontier.append(child)
+    return sorted(out)
+
+
+#: Computed once, not per clip: the tree does not move.
+FINGERS = finger_set()
 
 
 def world_joints(mats: np.ndarray, joints0: np.ndarray, hips: np.ndarray) -> np.ndarray:
@@ -187,6 +214,23 @@ def smooth_rotations(mats: np.ndarray, window: int = ROTATION_WINDOW) -> np.ndar
     return rot
 
 
+def smooth_fingers(mats: np.ndarray, window: int = FINGER_WINDOW,
+                   fingers: list[int] | np.ndarray | None = None) -> np.ndarray:
+    """A second, wider smoothing pass over the finger bones only.
+
+    The body needs a light touch (a heavy window mushes real motion), but a hand at
+    work barely changes shape from a third of a second to the next — the pass trades
+    invisible lag for the visible flicker keypoint noise puts on every finger joint.
+    Frame 0 stays untouched, as ever: `joints0` must remain frame 0's own posed joints.
+    """
+    fingers = FINGERS if fingers is None else list(fingers)
+    if not fingers:
+        return mats
+    out = np.array(mats, dtype=np.float64, copy=True)
+    out[:, fingers] = smooth_rotations(mats[:, fingers], window)
+    return out
+
+
 def shimmer(joints: np.ndarray) -> float:
     """Mean energy of the position second difference (mm): recovery noise shows as a
     constant floor here, real motion as peaks."""
@@ -211,6 +255,7 @@ def clean(quats: np.ndarray, joints0: np.ndarray, hips: np.ndarray, fps: float
     before = drift(feet_raw, contact)
 
     mats = smooth_rotations(raw)
+    mats = smooth_fingers(mats)
     joints = world_joints(mats, joints0, hips)
     # Net travel of the slow root motion: the raw path is mostly jitter, and gating on
     # it would read a standing clip as a walk.
@@ -234,6 +279,8 @@ def clean(quats: np.ndarray, joints0: np.ndarray, hips: np.ndarray, fps: float
                                   .min(axis=1)) * 100, 1),
         "shimmer_before": round(shimmer(joints_raw), 2),
         "shimmer_after": round(shimmer(joints), 2),
+        "finger_before": round(shimmer(joints_raw[:, FINGERS]), 2),
+        "finger_after": round(shimmer(joints[:, FINGERS]), 2),
         "travel": round(travel, 2), "pinned": pinned,
     }
     return {"quats": matrices_to_quaternions(mats).astype(np.float16),

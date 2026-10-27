@@ -252,14 +252,18 @@ def test_a_fingerless_rig_maps_without_fingers():
     assert not any("Thumb" in v or "Index" in v for v in m.values())
 
 
-def test_a_mitten_follows_the_middle_finger():
+def test_a_mitten_holds_rigid_with_its_hand():
+    """A hand with no finger chains cannot articulate: its stub bones follow the hand
+    bone rigidly. They used to copy SOMA's middle finger, which made the whole mitten
+    flap with the hand tracker's noise (the "fingers broken" look, found on the hero
+    rig)."""
     parents, heads, roles = _humanoid(face=+1, fingers=False)
     hand = roles["Lhand"]
     for i, name in enumerate(("mit0", "mit1")):
         parents[name] = hand if i == 0 else "mit0"
         heads[name] = heads[hand] + np.array([-0.05 * (i + 1), 0, 0])
     m, _ = kr.map_skintokens_to_soma(parents, heads)
-    assert m["mit0"].startswith("LeftHandMiddle") and m["mit1"].startswith("LeftHandMiddle")
+    assert m["mit0"] == m["mit1"] == m[hand] == "LeftHand"
 
 
 def test_stiff_fingers_follow_their_hand_and_leave_the_rest():

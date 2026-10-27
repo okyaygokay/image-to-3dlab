@@ -62,6 +62,7 @@ game-ready LODs), start with [the prop sheet guide](../docs/prop-sheets.md).
 | `hunyuan_cuda_generate.py` | Full image -> textured GLB through Tencent's own Hunyuan3D-2.1 on an NVIDIA card. |
 | `colab_generate.py` | Run one backend on a rented Colab GPU and bring the GLB back. |
 | `colab_prefetch.py` | Install the lab's other backends on this VM, one at a time, in the background. |
+| `ltx2_video.py` | Draw one acting clip with LTX-2.5 (distilled), as the video stage of the prompt-to-motion chain. |
 | `colab_supervisor.py` | Wait for one detached job on the Colab VM and record how it ended. |
 | `qwen_image_colab.py` | Draw one picture with Qwen-Image on the VM, through the same sd-cli the local route runs. |
 | `hi3d_generate.py` | Image -> refined GLB through Hi3D v1.0, on an NVIDIA card. |

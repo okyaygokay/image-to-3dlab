@@ -694,3 +694,40 @@ def test_the_prefetch_plan_survives_the_trip_to_the_vm(monkeypatch):
     assert plan and all(len(entry) == 3 for entry in plan)
     assert [entry[0] for entry in plan] == [backend for backend in cg.PREFETCH_ORDER
                                            if backend != "hi3d"]
+
+
+# --- the Hugging Face token, for gated models -----------------------------------------------
+
+
+def test_the_hf_token_rides_to_the_vm_but_never_the_log(monkeypatch, capsys):
+    """LTX-2.5's weights sit behind a click-through gate: its downloads need a token
+    from an account that pressed "Agree and Access", and a fresh VM has none. This
+    machine's token (env or `hf auth login`'s file) is carried over — and never
+    printed, because run logs are how people report bugs."""
+    sent: dict = {}
+
+    def fake_run(args, *, stdin=None, **_kwargs):
+        sent["stdin"] = stdin
+        return ""
+
+    monkeypatch.setattr(cg.colab, "run", fake_run)
+    monkeypatch.setenv("HF_TOKEN", "hf_secret_token")
+    monkeypatch.setattr(cg, "_token_file", lambda: "")    # one source at a time
+    cg.copy_hf_token("s")
+    assert "hf_secret_token" in sent["stdin"]
+    assert "/root/.cache/huggingface/token" in sent["stdin"]
+    assert "hf_secret_token" not in capsys.readouterr().out
+
+
+def test_no_token_means_no_trip(monkeypatch):
+    calls: list = []
+
+    def fake_run(args, **_kwargs):
+        calls.append(args)
+
+    monkeypatch.setattr(cg.colab, "run", fake_run)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    monkeypatch.setattr(cg, "_token_file", lambda: "")
+    cg.copy_hf_token("s")
+    assert calls == []

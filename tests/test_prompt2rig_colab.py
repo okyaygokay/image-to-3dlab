@@ -110,3 +110,77 @@ def test_the_keyframe_renders_through_the_only_bpy_on_the_vm(monkeypatch, tmp_pa
 
     venv_python.unlink()
     assert p2r.render_keyframe(tmp_path / "rig.glb", tmp_path / "other.png") is False
+
+
+def test_ltx2s_frame_grid_is_8k_plus_1():
+    """LTX's video VAE compresses time 8x: a clip must be 8k+1 frames long, and the
+    request is rounded up into that grid (the same deal as H3's 17n+5)."""
+    import ltx2_video
+
+    assert ltx2_video.snapped_frames(6.5) == 161      # 6.7 s — 6.5 s is off the grid
+    assert ltx2_video.snapped_frames(2) == 49         # under the window: the shortest clip
+    assert ltx2_video.snapped_frames(15) == 361       # the top of the window
+    assert all(frames % 8 == 1 for frames in
+               (ltx2_video.snapped_frames(s) for s in range(2, 16)))
+
+
+def test_ltx2s_prompt_is_one_long_paragraph_with_the_same_framing():
+    """LTX's card says it degrades on short prompts, so its prompt is one long
+    audio-visual paragraph — carrying the same planted-in-place framing the H3 one
+    does, or its actor would wander like H3's did."""
+    prompt = p2r.ltx_motion_prompt("a knight swinging a sword.")
+    assert prompt.startswith("A single continuous shot of one person a knight swinging "
+                             "a sword")
+    assert "both feet planted" in prompt and "no camera movement" in prompt
+    assert prompt.count("\n") == 0 and "sound" in prompt
+
+
+def test_the_video_engine_picks_who_acts_the_prompt_out(monkeypatch, tmp_path):
+    """`--video-engine ltx2` swaps the video stage; every later stage is
+    engine-agnostic because both engines land at 24 fps."""
+    calls = {}
+
+    def fake_h3(prompt, seconds, seed, out, keyframe):
+        calls["h3"] = (prompt, seed)
+
+    def fake_ltx2(prompt, seconds, seed, out, keyframe):
+        calls["ltx2"] = (prompt, seed)
+
+    monkeypatch.setattr(p2r, "generate_h3", fake_h3)
+    monkeypatch.setattr(p2r, "generate_ltx2", fake_ltx2)
+    p2r.generate_clip("swinging a sword", 6, 7, tmp_path / "a.mp4", None, "ltx2")
+    p2r.generate_clip("swinging a sword", 6, 8, tmp_path / "b.mp4", None)
+    assert list(calls) == ["ltx2", "h3"] and calls["ltx2"][1] == 7 and calls["h3"][1] == 8
+    # an already-generated clip answers to neither engine
+    (tmp_path / "have.mp4").write_bytes(b"clip")
+    p2r.generate_clip("swinging a sword", 6, 9, tmp_path / "have.mp4", None, "ltx2")
+    assert calls["ltx2"] == ("swinging a sword", 7)
+
+
+def test_ltx2_installs_on_demand_once(monkeypatch, tmp_path):
+    """The engine's ~72 GB is paid only when a run asks for it, and once per VM: the
+    marker is the bootstrap's own, so the two routes agree on what "installed" means."""
+    monkeypatch.setattr(p2r, "REPO", tmp_path)
+    driver = tmp_path / "vendor" / "prompt2rig-driver"
+    driver.mkdir(parents=True)
+    commands: list = []
+
+    def record(command, *, what):
+        commands.append([str(part) for part in command])
+
+    monkeypatch.setattr(p2r, "run", record)
+    p2r.ensure_ltx2()
+    assert commands[0][1].endswith("bootstrap_prompt2rig_colab.py")
+    assert commands[0][-2:] == ["--yes", "--ltx2-only"]
+    (driver / ".ltx2-done").write_text("ok")
+    commands.clear()
+    p2r.ensure_ltx2()
+    assert commands == []
+
+
+def test_the_video_engine_flag_parses():
+    """The studio forwards the engine after `--`; the default stays H3 until LTX-2.5
+    earns the job (the A/B decides)."""
+    argv = ["r.glb", "a.glb", "--prompt", "x"]
+    assert p2r.parse(argv + ["--video-engine", "ltx2"]).video_engine == "ltx2"
+    assert p2r.parse(argv).video_engine == "h3"

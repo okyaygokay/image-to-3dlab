@@ -123,6 +123,14 @@ model that acts the prompt out only exists on the rented GPU. One supervisor job
    holds comfortably, so the bootstrap downloads each big component alone, quantizes it to
    int8 with the torchao recipe from the model card, saves that and deletes the raw copy:
    peak disk stays near 100 GB, and a warm session loads the int8 weights straight back.
+   `--video-engine ltx2` swaps the actor for **LTX-2.5** (distilled, 8 sigma steps) — the
+   anti-flicker pick, since flicker is what motion recovery turns into shimmer. It lives
+   in its own venv (diffusers main, pinned by commit) and its ~72 GB of weights install
+   on the VM **on demand**, only when a run first asks for it. The weights repo is
+   click-through gated: press "Agree and Access" once at
+   [Lightricks/LTX-2.5-Diffusers](https://huggingface.co/Lightricks/LTX-2.5-Diffusers),
+   then `hf auth login` locally — the supervisor copies that token to the VM for the
+   install. Licence: LTX-2.x Community License, free under $10M revenue, no branding.
 2. **GVHMR** lifts SMPL-X motion from the clip (its `static_camera` fast path — a generated
    clip never moves the camera).
 3. **WiLoR** tracks both hands — MANO ships with the WiLoR authors' own weights, so

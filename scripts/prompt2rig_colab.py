@@ -11,8 +11,11 @@ installed by `scripts/bootstrap_prompt2rig_colab.py`. Five stages, all on the VM
 1. **Video** — MiniMax H3 (`fl2va`, int8) acts the prompt out: one person, full body,
    planted on the spot, static camera, ~6 s at 960×544. Motion recovery does not need
    more than that, and the smaller canvas is ~2.3× faster per step than the trained
-   768p one. Two takes by default (`--tries`): the video model rolls a different actor
-   each seed, and a take whose hands track badly or whose feet wander is thrown away.
+   768p one. `--video-engine ltx2` swaps in LTX-2.5 distilled — the anti-flicker pick
+   (flicker is what motion recovery turns into shimmer), ~72 GB installed on the VM on
+   first use, gated repo. Two takes by default (`--tries`): the video model rolls a
+   different actor each seed, and a take whose hands track badly or whose feet wander
+   is thrown away.
 2. **Body motion** — GVHMR lifts SMPL-X motion from the clip (a generated clip has a
    static camera, which is its `-s` fast path).
 3. **Fingers** — WiLoR (or MediaPipe) tracks the hands on the full-rate clip, in parallel
@@ -97,6 +100,20 @@ def motion_prompt(user_prompt: str) -> str:
             "proportions.")
 
 
+def ltx_motion_prompt(user_prompt: str) -> str:
+    """The description LTX-2.5 acts out: the same planted-in-place framing the H3 prompt
+    carries, but as one long paragraph — its card says it was trained on long
+    single-paragraph audio-visual captions and degrades on short ones, so the light and
+    the (quiet) room are named too."""
+    return (f"A single continuous shot of one person {user_prompt.rstrip('.')}, standing "
+            "in one spot with both feet planted on the floor, not walking or stepping "
+            "around, the whole person in frame and centered for the entire clip. The "
+            "camera is locked on a tripod, medium-wide, eye level; a plain studio "
+            "backdrop in flat, even lighting; no cuts, no camera movement. Realistic "
+            "human proportions, natural weight shifts as the person moves; the only "
+            "sound is the quiet room.")
+
+
 def render_keyframe(rigged: Path, out: Path) -> bool:
     """The clip's first frame: our own rig, full body, front — the keyframe that keeps
     H3's actor our character and its framing still for the motion recovery.
@@ -121,11 +138,58 @@ def render_keyframe(rigged: Path, out: Path) -> bool:
 
 
 def generate_clip(prompt: str, seconds: float, seed: int, out: Path,
-                  keyframe: Path | None = None) -> None:
-    """Stage 1: MiniMax H3, int8, from the local install the bootstrap quantized."""
+                  keyframe: Path | None = None, engine: str = "h3") -> None:
+    """Stage 1: the acting clip. MiniMax H3 (int8) by default; LTX-2.5 distilled with
+    `engine="ltx2"` — the anti-flicker pick, and flicker is exactly what motion
+    recovery turns into shimmer. Both land at 24 fps, so nothing downstream knows
+    which engine acted the clip out."""
     if out.is_file():
         log(f"video: have {out.name}")
         return
+    if engine == "ltx2":
+        generate_ltx2(prompt, seconds, seed, out, keyframe)
+    else:
+        generate_h3(prompt, seconds, seed, out, keyframe)
+
+
+def ensure_ltx2() -> None:
+    """The LTX-2.5 engine installs on demand: its own venv and ~72 GB of weights that a
+    VM only pays for when a run actually asks for the engine. The marker is the
+    bootstrap's own, so both routes agree on what "installed" means."""
+    marker = REPO / "vendor" / "prompt2rig-driver" / ".ltx2-done"
+    if marker.is_file():
+        return
+    log("video: installing LTX-2.5 on this VM first (one time, about 72 GB — "
+        "a gated repo, so a Hugging Face token must already be on the VM)")
+    run([sys.executable, REPO / "scripts" / "bootstrap_prompt2rig_colab.py",
+         "--yes", "--ltx2-only"], what="ltx2 install")
+
+
+def generate_ltx2(prompt: str, seconds: float, seed: int, out: Path,
+                  keyframe: Path | None) -> None:
+    """Stage 1, the LTX-2.5 way: the distilled checkpoint in its own venv, driven by
+    `scripts/ltx2_video.py` (which lives over the details — the sigma schedule, the
+    8k+1 frame grid, the silent soundtrack we drop)."""
+    import ltx2_video
+
+    ensure_ltx2()
+    frames = ltx2_video.snapped_frames(seconds)
+    argv = [str(REPO / "vendor" / "ltx2" / ".venv" / "bin" / "python"),
+            str(REPO / "scripts" / "ltx2_video.py"), str(out),
+            "--prompt", ltx_motion_prompt(prompt),
+            "--seconds", f"{seconds:g}", "--seed", str(seed)]
+    if keyframe is not None and keyframe.is_file():
+        argv += ["--keyframe", str(keyframe)]
+    log(f"video: LTX-2.5 acting out {frames} frames "
+        f"({frames / ltx2_video.FPS:.1f}s, distilled"
+        f"{', from the rig keyframe' if keyframe else ''})")
+    run(argv, what="video")
+
+
+def generate_h3(prompt: str, seconds: float, seed: int, out: Path,
+                keyframe: Path | None) -> None:
+    """Stage 1, the H3 way: MiniMax H3, int8, from the local install the bootstrap
+    quantized."""
     # fl2va without a keyframe is a chain that noises an empty list of conditions
     # (found on the first live run): the keyframe is what selects the workflow, and the
     # pipeline wants it opened — a path string dies in its resize step (`keyframe.size`).
@@ -232,6 +296,10 @@ def parse(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--tries", type=int, default=2,
                         help="how many takes to act out; the best-scoring one is kept")
+    parser.add_argument("--video-engine", choices=("h3", "ltx2"), default="h3",
+                        help="Who acts the prompt out: MiniMax H3 (default) or LTX-2.5 "
+                             "distilled (the anti-flicker pick; installs ~72 GB on the "
+                             "VM on first use)")
     parser.add_argument("--arm-spread", type=float, default=0.0)
     parser.add_argument("--speed", type=float, default=1.0)
     return parser.parse_args(argv)
@@ -244,7 +312,7 @@ def take(args: argparse.Namespace, work: Path, seed: int, keyframe: Path | None)
     paying for its video again. Returns the artifacts plus the cleaner's report.
     """
     clip = work / "clip.mp4"
-    generate_clip(args.prompt, args.seconds, seed, clip, keyframe)
+    generate_clip(args.prompt, args.seconds, seed, clip, keyframe, args.video_engine)
     gvhmr_clip = reencode_for_gvhmr(clip, work)
     motion = recover_motion(gvhmr_clip, work)
     frames = len(motion["motion"]["transl"])

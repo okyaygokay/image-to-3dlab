@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -63,6 +64,28 @@ WILOR_MINI_COMMIT = "ebec42f94c389070cdd7dda6fd1bf0b4a659c960"
 H3_REPO, H3_REVISION = "MiniMaxAI/MiniMax-H3", "42ed227ee7df40d41602854ae760620d6eb651fe"
 SMPLX_REPO, SMPLX_REVISION = "artabatest/smplx_model", "92f4c34af9104fe983c61c138b59223d5f10b16f"
 SMPLX_FILE = "human_models/human_model_files/models_smplx_v1_1/smplx/SMPLX_NEUTRAL.npz"
+
+#: The alternate video engine, installed on demand (`--ltx2-only`): LTX-2.5 distilled,
+#: the anti-flicker pick — its pitch is temporal stability in high-motion shots, and
+#: flicker is what motion recovery turns into shimmer. It needs diffusers *main*
+#: (LTX2Pipeline is not in a release), so it gets its own venv rather than gambling
+#: the H3 one on an upgrade. The weights repo is click-through gated: the VM needs a
+#: token from an account that pressed "Agree and Access" (the supervisor copies this
+#: machine's token over when it can find one).
+LTX2_REPO, LTX2_REVISION = "Lightricks/LTX-2.5-Diffusers", \
+    "4791a1100e0cf97f7ed5c55c12dd71dce13f9dd3"
+LTX2_VENV = REPO / "vendor" / "ltx2" / ".venv"
+LTX2_MODEL = REPO / "vendor" / "ltx2" / "model"
+#: What `--exclude transformer_full/*` leaves: the distilled transformer, the Gemma 4
+#: text encoder, the conv VAE and the audio stack `model_index.json` insists on.
+LTX2_GB = 72.0
+DIFFUSERS_MAIN_COMMIT = "06a9cfb86ae8aa69c6a220ba0da0f37b819dde6a"
+LTX2_TRANSFORMERS, LTX2_ACCELERATE = "5.21.0", "1.15.0"
+LTX2_LICENCE = (
+    "LTX-2.5: LTX-2.x Community License — free including commercial use under\n"
+    "  $10M annual revenue, no mandatory branding; above that, a paid agreement with\n"
+    "  Lightricks. https://github.com/Lightricks/LTX-2/blob/main/LICENSE-2_x"
+)
 # What the pinned revisions actually serve, each set after downloading it and checking
 # the file's shape: a SMPL-X v1.1 layout (10475 verts, 20908 faces, a 55-joint
 # J_regressor, the hand PCA blocks). The first recording of these checksums was wrong
@@ -253,11 +276,7 @@ def ensure_venv() -> None:
     # cu130 — the newer index a CUDA 13 driver would suggest — so the driver's newest
     # build is the wrong thing to ask for here. A newer driver runs older CUDA wheels
     # fine; what must be checked is the floor.
-    driver = host.driver_cuda_version()
-    if driver is None or driver < (12, 8):
-        why = "no NVIDIA driver answered (nvidia-smi)" if driver is None else \
-            f"the driver supports CUDA {driver[0]}.{driver[1]}; the cu128 wheels need 12.8 or newer"
-        raise SystemExit(f"cannot install the prompt-to-motion venv here: {why}")
+    require_cu128_driver()
     index = host.TORCH_INDEX + "cu128"
     # chumpy — the SMPL stack's ancient dependency, pulled from git — imports pip inside
     # its setup.py, and uv's isolated build environment carries no pip (found on the
@@ -312,7 +331,85 @@ def ensure_autorig() -> None:
     marker("autorig").write_text("ok")
 
 
-def announcement() -> str:
+def ltx2_venv_python() -> Path:
+    return LTX2_VENV / "bin" / "python"
+
+
+def require_cu128_driver() -> None:
+    """Both torch venvs pay the same wheel floor, so the check lives in one place."""
+    driver = host.driver_cuda_version()
+    if driver is None or driver < (12, 8):
+        why = "no NVIDIA driver answered (nvidia-smi)" if driver is None else \
+            f"the driver supports CUDA {driver[0]}.{driver[1]}; the cu128 wheels need 12.8 or newer"
+        raise SystemExit(f"cannot install a torch venv here: {why}")
+
+
+def gated_help(repo: str) -> str:
+    return (f"\nHugging Face refused {repo}: it is gated (a click-through, not a wait).\n"
+            f"  1. Sign in and press \"Agree and Access\" at\n"
+            f"     https://huggingface.co/{repo}\n"
+            "  2. Give the lab a token from that account: the supervisor copies\n"
+            "     HF_TOKEN or ~/.cache/huggingface/token to the VM, so\n"
+            "     `hf auth login` on this machine once is the easy way\n"
+            "  3. Run this again. Nothing was downloaded for it.")
+
+
+def ensure_ltx2() -> None:
+    """The alternate video engine (LTX-2.5 distilled): its own venv, because LTX2Pipeline
+    lives in diffusers main and gambling the H3 venv on an upgrade would put two moving
+    targets in one environment. Its own marker, so a VM only pays the ~72 GB when a run
+    actually asks for `--video-engine ltx2`."""
+    if marker("ltx2").is_file():
+        return
+    # Access first, before anything is built or downloaded: a gated refusal with 72 GB
+    # half-fetched behind it is the expensive way to learn about the click-through.
+    access = subprocess.run(
+        [hf(), "download", LTX2_REPO, "README.md", "--revision", LTX2_REVISION,
+         "--local-dir", str(DRIVER / "gate-check")],
+        capture_output=True, text=True, timeout=600, check=False)
+    if access.returncode != 0:
+        print((access.stderr or access.stdout)[-800:], file=sys.stderr, flush=True)
+        raise SystemExit(gated_help(LTX2_REPO))
+    free_gb = shutil.disk_usage(str(REPO)).free / 1e9
+    if free_gb < LTX2_GB + 10:
+        raise SystemExit(
+            f"LTX-2.5 needs about {LTX2_GB:.0f} GB and this VM has {free_gb:.0f} GB free; "
+            "skipping it (the default H3 engine needs no extra room)")
+    require_cu128_driver()
+    index = host.TORCH_INDEX + "cu128"
+    LTX2_VENV.parent.mkdir(parents=True, exist_ok=True)
+    must(["uv", "venv", "--python", PYTHON_VERSION, "--seed", "--clear", str(LTX2_VENV)],
+         what="creating the ltx2 venv", timeout=1200)
+    must(["uv", "pip", "install", "--python", str(ltx2_venv_python()), "--index-url", index,
+          f"torch=={TORCH_VERSION}", f"torchvision=={TORCHVISION_VERSION}"],
+         what=f"installing torch {TORCH_VERSION} for ltx2", timeout=7200)
+    must(["uv", "pip", "install", "--python", str(ltx2_venv_python()),
+          f"diffusers @ git+https://github.com/huggingface/diffusers@{DIFFUSERS_MAIN_COMMIT}",
+          f"transformers=={LTX2_TRANSFORMERS}", f"accelerate=={LTX2_ACCELERATE}"],
+         what="installing diffusers main for ltx2", timeout=3600)
+    print(f"downloading LTX-2.5 ({LTX2_GB:.0f} GB, one time on this VM; gated repo, "
+          f"pinned revision {LTX2_REVISION[:8]})", flush=True)
+    must([hf(), "download", LTX2_REPO, "--revision", LTX2_REVISION,
+          "--exclude", "transformer_full/*", "--local-dir", str(LTX2_MODEL)],
+         what="downloading LTX-2.5", timeout=14400)
+    marker("ltx2").write_text("ok")
+
+
+def announcement(*, ltx2: bool = False) -> str:
+    if ltx2:
+        return "\n".join([
+            "", "About to install:", "",
+            "  backend: the LTX-2.5 video engine (the --video-engine ltx2 stage of",
+            "           prompt-to-motion)",
+            "  route:   this rented Colab VM, into vendor/ltx2/",
+            (f"  size:    about 8 GB of packages (CUDA torch, cu128 on a G4) and"
+            f" {LTX2_GB:.0f} GB of weights that stay on disk"),
+            "  source:  Lightricks/LTX-2.5-Diffusers at a pinned revision (the distilled",
+            "           pack, transformer_full excluded); diffusers main at commit",
+            f"           {DIFFUSERS_MAIN_COMMIT[:8]}, because LTX-2.5 is not in a release",
+            f"  licence: {LTX2_LICENCE}",
+            "",
+        ])
     return "\n".join([
         "", "About to install:", "",
         "  backend: Prompt-to-motion (MiniMax H3 video · GVHMR motion · WiLoR fingers)",
@@ -328,26 +425,14 @@ def announcement() -> str:
         "  licence: MiniMax H3 Community License (US/EU/UK/KR excluded without an",
         "           application); GVHMR, WiLoR, SMPL-X and MANO are research-only — the",
         "           viewer writes all of this into every clip's provenance record",
+        "  optional: the LTX-2.5 video engine installs on demand (--video-engine ltx2,",
+        f"            ~{LTX2_GB:.0f} GB more, gated repo)",
         "",
     ])
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--yes", action="store_true",
-                        help="Skip the confirmation. For the studio and for agents.")
-    args = parser.parse_args(argv)
-
-    print(announcement(), flush=True)
-    if not args.yes:
-        if not sys.stdin or not sys.stdin.isatty():
-            print("Refusing to download without --yes when there is nobody to ask.")
-            return 1
-        if input("Continue? [y/N] ").strip().lower() not in {"y", "yes"}:
-            print("Nothing downloaded.")
-            return 1
-
+def ensure_driver() -> None:
+    """The `hf` CLI every download drives through, in its own tiny venv."""
     DRIVER.mkdir(parents=True, exist_ok=True)
     ensure_uv()
     if not driver_python().is_file():
@@ -356,6 +441,34 @@ def main(argv: list[str] | None = None) -> int:
     must(["uv", "pip", "install", "--python", str(driver_python()),
           f"huggingface_hub=={HF_HUB_VERSION}"],
          what="installing the driver's one package", timeout=1200)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--yes", action="store_true",
+                        help="Skip the confirmation. For the studio and for agents.")
+    parser.add_argument("--ltx2-only", action="store_true",
+                        help="Install only the LTX-2.5 video engine (its own venv plus "
+                             f"~{LTX2_GB:.0f} GB of weights): what a run asking for "
+                             "`--video-engine ltx2` builds on demand. Nothing here is "
+                             "needed for the default H3 engine.")
+    args = parser.parse_args(argv)
+
+    print(announcement(ltx2=args.ltx2_only), flush=True)
+    if not args.yes:
+        if not sys.stdin or not sys.stdin.isatty():
+            print("Refusing to download without --yes when there is nobody to ask.")
+            return 1
+        if input("Continue? [y/N] ").strip().lower() not in {"y", "yes"}:
+            print("Nothing downloaded.")
+            return 1
+
+    ensure_driver()
+    if args.ltx2_only:
+        ensure_ltx2()
+        print("\nDone. The prompt-to-motion chain can now use --video-engine ltx2.")
+        return 0
     ensure_venv()
     ensure_body_model()
     ensure_wilor()

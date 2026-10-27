@@ -76,3 +76,25 @@ def test_the_cli_reports_and_leaves_the_file_alone(tmp_path):
     before = path.read_bytes()
     assert mc.main([str(path), "--report-only"]) == 0
     assert path.read_bytes() == before
+
+
+def test_finger_flicker_comes_off():
+    """48 of the 77 joints are finger bones, and the hand tracker's per-frame noise
+    lands there and plays as broken fingers — curling and flicking faster than a real
+    hand moves. The finger pass takes it off."""
+    rng = np.random.default_rng(3)
+    quats, joints0 = _figure(140)
+    mats = mc.quaternions_to_matrices(quats.astype(np.float64))
+    noise = np.zeros((140, len(mc.SOMA77_PARENTS), 3))
+    noise[:, mc.FINGERS] = rng.normal(0.0, 0.05, (140, len(mc.FINGERS), 3))
+    noisy = mc.matrices_to_quaternions(aa_to_mat(noise) @ mats).reshape(140, -1, 4)
+    _out, report = mc.clean(noisy, joints0, np.zeros((140, 3)), 30.0)
+    assert report["finger_after"] < report["finger_before"] * 0.4
+    # frame 0 is still joints0's own frame, fingers included
+    assert np.allclose(_out["quats"][0].astype(np.float64), noisy[0], atol=1e-3)
+
+
+def test_the_finger_set_is_the_48_bones_below_the_wrists():
+    assert len(mc.FINGERS) == 48
+    assert mc.SOMA_INDEX["LeftHand"] not in mc.FINGERS     # the wrist itself stays body
+    assert mc.SOMA_INDEX["LeftHandThumb1"] in mc.FINGERS
