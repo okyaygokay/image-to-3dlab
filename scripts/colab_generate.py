@@ -89,6 +89,18 @@ BACKENDS: dict[str, dict[str, str]] = {
         "wrapper": "scripts/autorig_colab.py",
         "label": "Auto-rig (SkinTokens)",
     },
+    # The Animate tab's prompt box: a description becomes a clip (MiniMax H3, int8),
+    # 3D motion (GVHMR), fingers (WiLoR) and finally a retargeted animation, all on the
+    # VM, in one supervisor run.
+    "prompt2rig": {
+        "setup": "scripts/bootstrap_prompt2rig_colab.py",
+        "wrapper": "scripts/prompt2rig_colab.py",
+        "label": "Prompt-to-motion (H3 · GVHMR · WiLoR)",
+        # The clip the motion was read from and the packed motion itself come home beside
+        # the animated GLB: the clip is the evidence of what was asked for, the motion
+        # replays on any other rig (the Animate tab plays it directly).
+        "artifacts": (".motion.npz", ".clip.mp4"),
+    },
 }
 
 #: The venv each setup creates on the VM, relative to REMOTE_ROOT. A setup that installs
@@ -101,6 +113,7 @@ REMOTE_PYTHON = {
     "pixal3d": f"{REMOTE_ROOT}/vendor/pixal3d-cpp/.venv/bin/python",
     "qwen_image": f"{REMOTE_ROOT}/vendor/sdcpp/.venv/bin/python",
     "autorig": f"{REMOTE_ROOT}/vendor/SkinTokens/.venv/bin/python",
+    "prompt2rig": f"{REMOTE_ROOT}/vendor/prompt2rig/.venv/bin/python",
 }
 
 #: The stamp a setup writes when it is done, so a warm session skips 20 minutes of install.
@@ -554,7 +567,10 @@ def main(argv: list[str] | None = None) -> int:
                         f"{REMOTE_ROOT + '/jobs'!r})]",
                   timeout=240)
         if remote_in is not None:
-            colab.run(["upload", str(upload_source), remote_in, "-s", session], timeout=600)
+            # Three tries: a large upload over a hotel-quality link dies to a connection
+            # reset now and then, and one flaky byte should not cost a 20-minute run.
+            colab.run(["upload", str(upload_source), remote_in, "-s", session],
+                      timeout=600, attempts=3)
             log(f"uploaded {upload_source.name}")
         sync_tree(session)
         ensure_remote_setup(session, args.backend, skip=args.skip_setup)

@@ -275,9 +275,10 @@ def run(args: list[str], *, timeout: float = 180, stdin: str | None = None,
     The bound matters: `colab exec` blocks on a fresh VM's kernel, and an unbounded child
     would hang the studio's whole job queue rather than failing one job.
 
-    ``attempts`` is for `exec` specifically: a VM that is still bringing its kernel up does
-    not answer at all, which is not a failure, so callers pass a retry count rather than
-    treating the first silence as a dead session.
+    ``attempts`` is for calls whose first failure is often not a failure: a VM that
+    is still bringing its kernel up does not answer at all, and a large upload dies
+    to a connection reset now and then, so callers pass a retry count rather than
+    treating the first silence or reset as a dead session.
     """
     last = ""
     for attempt in range(1, max(1, attempts) + 1):
