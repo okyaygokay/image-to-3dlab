@@ -41,7 +41,7 @@ def generate(prompt: str, out: Path, seconds: float, seed: int,
     """One clip, video only — audio is generated jointly but motion recovery has no
     use for it, so it is dropped rather than encoded."""
     import torch
-    from diffusers import LTX2Pipeline
+    from diffusers import LTX2ImageToVideoPipeline, LTX2Pipeline
     from diffusers.pipelines.ltx2.utils import (
         DEFAULT_NEGATIVE_PROMPT,
         DISTILLED_SIGMA_VALUES,
@@ -53,12 +53,17 @@ def generate(prompt: str, out: Path, seconds: float, seed: int,
     frames = snapped_frames(seconds)
     print(f"ltx2: {frames} frames ({frames / FPS:.1f}s) at {width}x{height}, seed {seed}",
           flush=True)
+    # A first frame rides the *dedicated* I2V pipeline: the base LTX2Pipeline takes no
+    # `image` at all (found on the first live run — TypeError at the call). The two
+    # share the model dir, the distilled knobs and the (video, audio) return shape, so
+    # everything below is engine-agnostic between them.
+    cls = LTX2ImageToVideoPipeline if keyframe is not None else LTX2Pipeline
     # The prompt-enhancer pair is optional and deliberately absent (the bootstrap skips
     # its 10 GB): this chain writes its own long captions, and passing None keeps
     # from_pretrained from looking for folders that are not there. With no enhancer the
     # pipeline would fall back to the text encoder anyway — and only when asked.
-    pipe = LTX2Pipeline.from_pretrained(str(model_dir), dtype=torch.bfloat16,
-                                        prompt_enhancer=None, processor=None)
+    pipe = cls.from_pretrained(str(model_dir), dtype=torch.bfloat16,
+                               prompt_enhancer=None, processor=None)
     pipe.enable_model_cpu_offload()
     call = {
         "prompt": prompt, "negative_prompt": DEFAULT_NEGATIVE_PROMPT,
