@@ -181,7 +181,7 @@ def sync_tree(session: str) -> None:
         archive = _sync_archive(Path(scratch) / "i2l-code.tar.gz")
         size = archive.stat().st_size
         remote = f"{REMOTE_ROOT}/i2l-code.tar.gz"
-        colab.run(["upload", str(archive), remote, "-s", session], timeout=600)
+        colab.run(["upload", str(archive), remote, "-s", session], timeout=600, attempts=3)
     colab.run(["exec", "-s", session, "--timeout", "180"], attempts=3,
               stdin=(
                   "import os, tarfile\n"
@@ -359,7 +359,8 @@ def fetch_artifacts(session: str, backend: str, remote_output: str, local_output
                 colab.run(["exec", "-s", session, "--timeout", "120"], stdin=code,
                           timeout=180, attempts=2)
                 packed = scratch / f"{stem}.svviews.tar"
-                colab.run(["download", archive, str(packed), "-s", session], timeout=600)
+                colab.run(["download", archive, str(packed), "-s", session],
+                          timeout=600, attempts=3)
                 target.mkdir(parents=True, exist_ok=True)
                 with tarfile.open(packed) as tar:
                     tar.extractall(target)
@@ -369,7 +370,11 @@ def fetch_artifacts(session: str, backend: str, remote_output: str, local_output
                 continue
         else:
             try:
-                colab.run(["download", remote, str(target), "-s", session], timeout=600)
+                # Three tries: these ride the same link the upload does, and a reset on
+                # the one file a later step needs (the clean-up dump) must not be mistaken
+                # for a wrapper that wrote nothing.
+                colab.run(["download", remote, str(target), "-s", session],
+                          timeout=600, attempts=3)
             except colab.ColabError:
                 continue
             if not target.is_file():
@@ -590,7 +595,10 @@ def main(argv: list[str] | None = None) -> int:
             raise colab.ColabError(f"the remote run failed: {detail}")
 
         local_out.parent.mkdir(parents=True, exist_ok=True)
-        colab.run(["download", remote_out, str(local_out), "-s", session], timeout=1800)
+        # Three tries: this is the finished GLB, and losing it to a reset after an hour
+        # of rented GPU is the most expensive byte in the whole route.
+        colab.run(["download", remote_out, str(local_out), "-s", session],
+                  timeout=1800, attempts=3)
         if not local_out.is_file():
             raise colab.ColabError(
                 f"the VM finished but {remote_out} did not come back. The file may be "
