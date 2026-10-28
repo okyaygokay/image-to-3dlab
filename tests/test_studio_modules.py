@@ -1005,36 +1005,44 @@ def test_a_plan_s_files_and_settings_travel_to_the_server():
 
 
 @needs_node
-def test_hero_card_shows_for_characters_and_models_and_says_why_when_it_cannot_run():
+def test_hero_card_shows_for_any_engine_and_says_why_when_it_cannot_run():
+    """The head is a Pixal3D run of its own, so the body's engine never mattered — the
+    old card told Hi3D/TRELLIS models to be made again with Pixal3D. What can block is a
+    missing picture, or nowhere for the head to run (no local Pixal3D, no Colab)."""
     out = _run("steps.js", """
       const base = { picture: 'images/e/e.png', model: 'e__pixal3d__1/e.glb', finished: null };
-      const off = (a) => { const html = m.heroCard(a); return html.includes('hero-card off') && !html.includes('data-run') ? html : false; };
+      const off = (a, c) => { const html = m.heroCard(a, c); return html.includes('hero-card off') && !html.includes('data-run') ? html : false; };
       console.log(JSON.stringify({
         model: m.heroCard({ ...base, kind: 'model' }).includes('Finish as a Hero'),
         finishedChar: m.heroCard({ ...base, kind: 'character', finished: 'finish/x/e_20k.glb' }).includes('Make a Hero version'),
         alreadyHero: m.heroCard({ ...base, kind: 'character', finished: 'finish/x/e_hero.glb' }),
         prop: m.heroCard({ ...base, kind: 'prop' }), sheet: m.heroCard({ ...base, kind: 'prop set' }),
         notBuilt: m.heroCard({ ...base, kind: 'model', model: null }),
-        trellis: off({ ...base, kind: 'model', model: 'e__trellis__1/e.glb' }),
+        hi3d: m.heroCard({ ...base, kind: 'model', model: 'e__colab-hi3d__1/e.glb' }).includes('Finish as a Hero'),
+        rented: m.heroCard({ ...base, kind: 'model' }, { heroReady: true, heroRoute: 'colab' }).includes('rented GPU'),
+        noPixal: off({ ...base, kind: 'model' }, { heroReady: false }),
         noPicture: off({ ...base, kind: 'model', picture: null }) }));""")
-    assert {k: v for k, v in out.items() if k not in ("trellis", "noPicture")} == {
-        "model": True, "finishedChar": True, "alreadyHero": "", "prop": "", "sheet": "", "notBuilt": ""}
-    assert "Pixal3D" in out["trellis"]          # greyed out with the reason, never just gone
+    assert {k: v for k, v in out.items() if k not in ("noPixal", "noPicture")} == {
+        "model": True, "finishedChar": True, "alreadyHero": "", "prop": "", "sheet": "",
+        "notBuilt": "", "hi3d": True, "rented": True}
+    assert "Pixal3D" in out["noPixal"] and "Colab" in out["noPixal"]  # greyed out with the reason, never just gone
     assert "picture" in out["noPicture"]
 
 
 @needs_node
-def test_finish_detail_offers_hero_only_where_it_can_run_and_its_hint_follows_the_choice():
+def test_finish_detail_offers_hero_where_the_head_can_run_and_its_hint_follows_the_choice():
     out = _run("steps.js", """
       const ctx = { blenderReady: true, engines: [], presets: [] };
       const a = { kind: 'character', picture: 'i/k.png', model: 'm/k__pixal3d__1/k.glb', finished: null, clips: [] };
       const option = (html) => html.match(/<option value="hero"[^>]*>/)[0];
       const html = m.stepBody('finished', a, ctx);
       console.log(JSON.stringify({
-        ok: option(html), trellis: option(m.stepBody('finished', { ...a, model: 'm/k__trellis__1/k.glb' }, ctx)),
+        ok: option(html), hi3d: option(m.stepBody('finished', { ...a, model: 'm/k__colab-hi3d__1/k.glb' }, ctx)),
+        noPixal: option(m.stepBody('finished', a, { ...ctx, heroReady: false })),
         // the Detail menu shows and hides its own hint, never the Hero card's button above it
         heroButtons: (html.match(/data-hero[ >]/g) || []).length, hints: (html.match(/data-hero-hint/g) || []).length }));""")
-    assert "disabled" not in out["ok"] and "disabled" in out["trellis"]
+    assert "disabled" not in out["ok"] and "disabled" not in out["hi3d"]  # any engine's body can take one
+    assert "disabled" in out["noPixal"]                                   # nowhere for the head to run
     assert out["heroButtons"] == 1 and out["hints"] == 1
 
 

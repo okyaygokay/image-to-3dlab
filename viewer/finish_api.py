@@ -161,9 +161,13 @@ def capabilities(platform: str | None = None, find=blender_lookup.find_blender,
                  version=blender_lookup.blender_version,
                  installable=blender_lookup.can_install) -> dict[str, Any]:
     """What Finish can do on this machine, for the page to say before anyone clicks."""
+    import backend_catalog
+
     repaint = (platform or host_platform()) == APPLE
     found = find()
     found_version = version(found) if found else None
+    hero_local = pixal_installed()
+    hero_colab = not hero_local and backend_catalog.colab_ready()
     return {
         "repaint": repaint,
         "repaint_note": None if repaint else REPAINT_NOTE,
@@ -174,6 +178,12 @@ def capabilities(platform: str | None = None, find=blender_lookup.find_blender,
         "ready": found is not None,
         # Setup's Blender card offers Install Blender (scripts/bootstrap_blender.py).
         "blender_installable": found is None and installable(),
+        # Hero face fits any engine's body — the head is a Pixal3D run of its own — so
+        # what the page needs to know is only where that run goes: this machine's
+        # install, the rented GPU on a signed-in studio, or nowhere yet (the card says
+        # which, instead of the old "make the model again with Pixal3D").
+        "hero_ready": hero_local or hero_colab,
+        "hero_route": "local" if hero_local else ("colab" if hero_colab else None),
     }
 
 
@@ -239,6 +249,19 @@ def build_command(
     return command
 
 
+def pixal_installed() -> bool:
+    """Whether this machine's trellis-cli is installed: a Hero head could run here."""
+    scripts = str(HERO_WORKER.parents[0])
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    try:
+        import pixal3d_generate
+
+        return pixal3d_generate.CLI.is_file()
+    except ImportError:
+        return False
+
+
 def hero_pixal_route() -> str:
     """Where the route's Pixal3D calls run: this machine's trellis-cli, or a rented GPU.
 
@@ -249,16 +272,8 @@ def hero_pixal_route() -> str:
     """
     import backend_catalog
 
-    scripts = str(HERO_WORKER.parents[0])
-    if scripts not in sys.path:
-        sys.path.insert(0, scripts)
-    try:
-        import pixal3d_generate
-
-        if pixal3d_generate.CLI.is_file():
-            return "local"
-    except ImportError:
-        pass
+    if pixal_installed():
+        return "local"
     return "colab" if backend_catalog.colab_ready() else "local"
 
 

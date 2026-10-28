@@ -74,6 +74,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `move_description` advanced choice. See [docs/colab-gpu.md](docs/colab-gpu.md).
 
 ### Fixed
+- **Hero face is offered on any engine's model.** The Finish step still refused it on
+  anything not made with Pixal3D ("make the model again"), a leftover from when the head
+  needed the body's own saved cameras. The head has long been a Pixal3D run of its own —
+  this machine's install if present, else the rented GPU on a signed-in studio — and the
+  body's engine never mattered. The card now greys out only when the picture is missing
+  or the head has nowhere to run, and says which of the two it is; on the Colab route it
+  says the head is built on the rented GPU (whose first Hero pays a one-time Pixal3D
+  install, visible now thanks to the streaming install below).
 - **A first-run install is now seen living, and a channel that dies fails fast.** Found
   live on 2026-10-28: an install's output was captured on the VM and printed once at the
   end, so for its whole run (up to an hour) a healthy install and an exec channel whose

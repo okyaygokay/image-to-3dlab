@@ -518,6 +518,28 @@ def test_capabilities_explain_a_missing_or_old_blender(tmp_path):
     assert old["ready"] and "older than" in old["blender_problem"]
 
 
+def test_capabilities_say_where_a_hero_head_would_run(tmp_path, monkeypatch):
+    """Any engine's body can take a Hero face; what the page needs to know is where the
+    head goes — this machine's Pixal3D, the rented GPU, or nowhere yet."""
+    import backend_catalog
+
+    exe = tmp_path / "blender"
+    exe.write_text("")
+
+    def caps():
+        return finish.capabilities("nvidia", find=lambda: exe, version=lambda _: (5, 2))
+
+    monkeypatch.setattr(finish, "pixal_installed", lambda: True)
+    assert caps()["hero_ready"] and caps()["hero_route"] == "local"
+
+    monkeypatch.setattr(finish, "pixal_installed", lambda: False)
+    monkeypatch.setattr(backend_catalog, "colab_ready", lambda: True)
+    assert caps()["hero_ready"] and caps()["hero_route"] == "colab"
+
+    monkeypatch.setattr(backend_catalog, "colab_ready", lambda: False)
+    assert not caps()["hero_ready"] and caps()["hero_route"] is None
+
+
 def test_an_nvidia_run_never_asks_the_worker_for_a_repaint(tmp_path, monkeypatch):
     monkeypatch.setattr(finish, "host_platform", lambda: "nvidia")
     manager = finish.FinishJobManager(output_root=tmp_path, generated_root=tmp_path / "none")

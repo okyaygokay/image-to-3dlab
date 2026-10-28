@@ -20,6 +20,8 @@ let stageFilter = 'all', engineFilter = 'all', starredOnly = false, sortBy = 'ne
 let current = null;
 let engines = [], presets = [], recipes = null, frontBack = null, busy = false, playNext = null;
 let blenderReady = true;  // Finish and Split need Blender; the Finish step says so before anyone clicks
+let heroReady = true;     // a Hero head needs Pixal3D somewhere: this machine, or the rented GPU
+let heroRoute = null;     // 'local' | 'colab' | null — where that head would run
 let making = null, viewingMaking = false;  // the asset Create is making right now
 let viewingPictures = false;  // the viewer shows the asset's pictures instead of its model
 let viewingStep = null;       // a step id when the viewer shows that step's own model (the raw one, say)
@@ -264,6 +266,8 @@ const ctx = {
   get engines() { return engines; },
   get presets() { return presets; },
   get blenderReady() { return blenderReady; },
+  get heroReady() { return heroReady; },
+  get heroRoute() { return heroRoute; },
   url: (relative) => url(relative),
   asset: () => current,
   // a Steps-panel run goes through the same chain as Create: a reopened studio picks it back
@@ -439,7 +443,9 @@ async function loadTools() {
     fetch('/api/animate/models').then((r) => r.json()).catch(() => null),
     fetch('/api/finish/capabilities').then((r) => r.json()).catch(() => null),
   ]);
-  blenderReady = finishCaps ? !!finishCaps.ready : true;   // unknown: let the server say
+  blenderReady = finishCaps ? !!finishCaps.ready : true;        // unknown: let the server say
+  heroReady = finishCaps ? finishCaps.hero_ready !== false : true; // absent: unknown, the run says
+  heroRoute = finishCaps ? (finishCaps.hero_route || null) : null;
   engines = readyEngines(catalog);
   frontBack = catalog?.front_back || null;
   presets = animate?.installed ? animate.presets : [];

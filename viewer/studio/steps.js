@@ -50,13 +50,13 @@ export function stepBody(stepId, asset, ctx) {
       <button class="primary" data-run="finished">Split into props</button>`;
   }
   if (stepId === 'finished') {
-    const hero = heroCard(asset);
+    const hero = heroCard(asset, ctx);
     const photo = asset.picture
       ? '<label class="check"><input type="checkbox" data-k="photo" checked><span>Pixel Match <span class="hint">keeps your picture\'s sharp details on the front</span></span></label>'
       : '<p class="hint">No picture on disk for this model, so Pixel Match is skipped: Finish cleans up the mesh and re-bakes its own texture.</p>';
     const skipped = !asset.finished && asset.rigged
       ? '<p class="hint">Skipped so far. Finishing now makes a new finished model; rig it again to use it.</p>' : '';
-    const controls = `${skipped}${finishDetail(asset)}${photo}
+    const controls = `${skipped}${finishDetail(asset, ctx)}${photo}
       <details class="adv"><summary>Advanced</summary>
         ${asset.picture ? '<label class="check"><input type="checkbox" data-k="edgefade" checked><span>Edge fade <span class="hint">Pixel Match fades out where one part sits in front of another, like an ear in front of a head. Turn it off if hair gets coloured specks or small eyes go dark, most often on Full detail.</span></span></label><label class="check"><input type="checkbox" data-k="nudge" checked><span>Nudge <span class="hint">Pixel Match first fits your picture onto the model. Turn it off if a feature shows up twice (a ghost eye) or slides off its place.</span></span></label>' : ''}
         <label class="field">Texture size<select data-k="texture"><option value="1024">1024 px</option><option value="2048" selected>2048 px</option><option value="4096">4096 px</option></select></label>
@@ -90,31 +90,36 @@ function redoBox(title, note, body) {
 
 // Detail: three tested triangle counts, or a custom one (the server takes 1,000 to 200,000). Tested on
 // five very different models: 10k and 20k stay clean, 40k adds rough patches on some, 5k breaks.
-/** Why Hero face cannot run on this model, or null when it can. Hero rebuilds the head from the
- *  picture through the model's saved Pixal3D camera, so it needs both. */
-export function heroBlocked(asset) {
+/** Why Hero face cannot run on this model, or null when it can. The head is a Pixal3D
+ *  run of its own — the body's engine never mattered — so the real needs are two: the
+ *  source picture, and somewhere for the head to run (this machine's Pixal3D, or the
+ *  rented GPU on a studio signed in to Colab). */
+export function heroBlocked(asset, ctx) {
   if (!asset.picture) return 'Hero face needs the picture this model was made from, and none is saved with it.';
-  if (!/__pixal3d__/.test(asset.model || '')) return 'Hero face works on models made with Pixal3D. Make the 3D model again with Pixal3D (Advanced: 3D model).';
+  if (ctx && ctx.heroReady === false)
+    return 'Hero face builds its head with Pixal3D. Install Pixal3D from the Setup page, or sign in to Colab there and the head runs on the rented GPU.';
   return null;
 }
 
 /** A clear way to make a Hero face for a character: shown even once the character is finished,
  *  and greyed out with the reason when this model cannot have one, so it never just vanishes. */
-export function heroCard(asset) {
+export function heroCard(asset, ctx) {
   // a built model is 'model' until it is rigged ('character'); props and prop sheets never get one
   if (!['model', 'character'].includes(asset.kind) || !asset.model) return '';
   if (/_hero\.glb$/.test(asset.finished || '')) return '';
-  const blocked = heroBlocked(asset);
+  const blocked = heroBlocked(asset, ctx);
   if (blocked) {
     return `<div class="hero-card off"><p><b>Hero face</b> · not available for this model. ${esc(blocked)}</p></div>`;
   }
+  const where = ctx && ctx.heroRoute === 'colab'
+    ? ' The head itself is built with Pixal3D on the rented GPU; the first Hero on a VM installs it there once.' : '';
   return `<div class="hero-card"><p><b>Hero face</b> · builds the head again from a close, sharper crop of your picture and
-      joins it on: real eyelids instead of goggle eyes. Takes longer than a normal Finish. ${asset.finished ? 'Makes a new version; the current one is kept.' : ''}</p>
+      joins it on: real eyelids instead of goggle eyes.${where} Takes longer than a normal Finish. ${asset.finished ? 'Makes a new version; the current one is kept.' : ''}</p>
       <button class="primary" data-run="finished" data-hero>${asset.finished ? 'Make a Hero version' : 'Finish as a Hero'}</button></div>`;
 }
 
-function finishDetail(asset) {
-  const heroOff = heroBlocked(asset);
+function finishDetail(asset, ctx) {
+  const heroOff = heroBlocked(asset, ctx);
   return `<label class="field">Detail<select data-k="faces">
       <option value="10000">10,000 triangles · light</option>
       <option value="20000" selected>20,000 triangles · game-ready</option>
