@@ -214,11 +214,11 @@ def body_problem(body: Path | None, views: Path | None, dump: Path | None) -> st
     """Why an existing model cannot be the Hero body, in plain words, or None.
 
     The cameras and the clean-up dump are optional: they are what a *Pixal3D* body brings
-    (Pixel Match on the body, Pixal3D's own retopo), and a body from any other engine
-    (Hi3D, TRELLIS, ...) has neither -- it finishes the classic way and keeps its own
-    texture, which is the point of choosing that engine for the mesh. Only a *named*
-    --body-views that points at no transforms.json is an error: someone asked for Pixel
-    Match on a body that cannot have it.
+    (the maker's own cameras, Pixal3D's own retopo), and a body from any other engine
+    (Hi3D, TRELLIS, ...) has neither -- it finishes the classic way, with a front camera
+    fitted to it for Pixel Match. Only a *named* --body-views that points at no
+    transforms.json is an error: someone asked for Pixel Match on a body that cannot
+    have it.
     """
     if body is None:
         return None
@@ -295,14 +295,18 @@ def replay_command(colab: bool, dump: Path, output: Path, faces: int, atlas: int
 
 def finish(run: Run, model: Path, picture: Path, views: Path | None, out: Path, faces: int,
            dump: Path | None, classic: bool = False) -> None:
-    """Finish one model: retopo to FACES, and Pixel Match when its run's cameras exist.
+    """Finish one model: retopo to FACES, and Pixel Match when a camera exists for it.
 
-    `views` is None for a body from another engine (no .svviews behind it): the run then
-    has no photo stage and the model keeps its own texture. `dump` is None when the body
-    is not a Pixal3D model: the clean-up is the classic route. A Pixal3D body whose dump
-    was lost still keeps its mesh (--keep-mesh), as before. `classic` forces the classic
-    clean-up even on a Pixal3D model — the head's fallback when post-replay fails.
+    `views` is None for a body from another engine (no .svviews behind it): a front
+    camera is then fitted to the body so Pixel Match still paints the front from the
+    picture (the head's calls always bring their own views, so None can only mean a
+    foreign body). `dump` is None when the body is not a Pixal3D model: the clean-up is
+    the classic route. A Pixal3D body whose dump was lost still keeps its mesh
+    (--keep-mesh), as before. `classic` forces the classic clean-up even on a Pixal3D
+    model — the head's fallback when post-replay fails.
     """
+    if views is None:
+        views = fitted_front_views(run, model, picture, out)
     command = [PYTHON, "-u", FINISH, model, picture, out, "--steps-dir", out.with_suffix(".steps"),
                "--faces", str(faces), *FINISH_FLAGS]
     if views is not None:
@@ -317,6 +321,26 @@ def finish(run: Run, model: Path, picture: Path, views: Path | None, out: Path, 
     if dump and route == "classic":
         run.flag(f"Finish of {model.name} fell back to the classic clean-up (its frame check "
                  "objected; see run.log): hair and thin parts can shatter")
+
+
+def fitted_front_views(run: Run, model: Path, picture: Path, out: Path) -> Path | None:
+    """A camera for a body whose maker saved none, or None when even fitting fails.
+
+    The body keeps its own texture in that case, as before. `finish` is the only
+    caller, and the head never reaches here: its two calls always bring the head run's
+    own views.
+    """
+    from image_to_3dlab.front_view import fit_front_view
+
+    try:
+        fitted = fit_front_view(model, picture, out.with_suffix(".front-views"))
+    except Exception as exc:  # an unreadable mesh must not sink the whole run
+        run.flag(f"could not fit a front camera to {model.name} ({exc}); "
+                 f"Pixel Match on the body is skipped")
+        return None
+    run.flag("the body's maker saved no cameras, so a front camera was fitted to it: "
+             "Pixel Match paints the front from the picture (a fitted camera, not the maker's)")
+    return fitted
 
 
 def head_cleanup(run: Run, raw: Path, out: Path, faces: int, colab: bool = False) -> bool:

@@ -330,3 +330,37 @@ def test_finish_asks_for_the_route_it_was_given(monkeypatch, tmp_path):
     classic_cmd, kept_cmd = commands
     assert "--keep-mesh" not in classic_cmd and "--native-dump" not in classic_cmd
     assert "--keep-mesh" in kept_cmd
+
+
+def test_a_body_with_no_cameras_gets_a_front_one_fitted(monkeypatch, tmp_path):
+    """A foreign engine saves no cameras, and the body must still take the picture's
+    pixels: Finish is handed a camera fitted to the mesh, with the fit said out loud in
+    the run. A mesh that cannot even be read falls back to the old behaviour (the body
+    keeps its own texture) instead of sinking the run."""
+    import json
+
+    from image_to_3dlab import front_view as fv
+
+    fitted = tmp_path / "body.front-views"
+    monkeypatch.setattr(fv, "fit_front_view", lambda model, picture, out: fitted)
+
+    run = hero_route.Run(tmp_path)
+    commands, flags = [], []
+    monkeypatch.setattr(run, "run", lambda command, **_: commands.append([str(c) for c in command]) or True)
+    monkeypatch.setattr(run, "flag", lambda note: flags.append(note))
+    out = tmp_path / "body_out.glb"
+    out.with_suffix(".retopo-repaint.json").write_text(json.dumps({}))
+    hero_route.finish(run, tmp_path / "body.glb", tmp_path / "p.png", None, out, 20000, None)
+
+    assert str(fitted) in commands[0]                        # --views <the fitted camera>
+    assert any("fitted" in note for note in flags)           # and the run says so
+
+    def boom(*_a, **_k):
+        raise ValueError("not a glb")
+
+    monkeypatch.setattr(fv, "fit_front_view", boom)
+    commands.clear()
+    hero_route.finish(run, tmp_path / "body.glb", tmp_path / "p.png", None, out, 20000, None)
+    assert not any(str(fitted) in c for c in commands)       # no camera → classic, body keeps its texture
+    assert not (tmp_path / "out.glb").exists()               # and nothing else broke
+

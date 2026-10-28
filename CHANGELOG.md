@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A Hero body from any engine takes the picture's pixels too.** A Hero face on a
+  Hi3D/TRELLIS body used to leave the whole body on the engine's own texture: those
+  runs save no cameras, so Pixel Match had nothing to paint through. The hero route now
+  fits a front camera to such a body — the mesh's bounds against the picture's figure
+  box (a cut-out's alpha, else everything far from the picture's own border colour),
+  in the same frame the maker's cameras live in — and Pixel Match paints the front from
+  the photo like a one-view Pixal3D run: "on (front)" in the record. The fit is said
+  out loud in the run and written into the transforms.json, so a record never mistakes
+  a fitted camera for a maker's.
 - **LTX-2.5 as the acting engine for described motions (`--video-engine ltx2`).** The
   chain's videos flickered, and flicker is what motion recovery turns into shimmer and
   broken-looking hands. LTX-2.5 distilled (8 sigma steps, all guidance off, driven per
