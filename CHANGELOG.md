@@ -21,9 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one, the connectors' unsharded duplicate and the 10 GB prompt-enhancer pair are all
   left out (this chain writes its own long captions). Licence is the friendly one —
   LTX-2.x Community License: free including commercial use under $10M revenue, no
-  mandatory branding. **It won the A/B and is the default**: same rig, same prompt,
-  against H3 — recovery shimmer 5.6 vs 25.1, finger jitter 5.8 vs 26.7, hands tracked
-  97%/100% vs 82%/91%. `--video-engine h3` keeps MiniMax H3 available.
+  mandatory branding. **It won the A/B**: same rig, same prompt, against H3 — recovery
+  shimmer 5.6 vs 25.1, finger jitter 5.8 vs 26.7, hands tracked 97%/100% vs 82%/91%.
+  H3 stays the default all the same — a preference call, not a metrics one.
+- **One landscape canvas across the whole motion chain** (`960×544`). H3's canvas
+  tuple was written `(960, 544)` but read height-first, so its stage generated
+  portrait `544×960` clips — and since H3 stretches the rig's keyframe onto that
+  canvas, every keyframed H3 clip started from the character squashed to 57% width
+  and stretched 1.76× taller. Motion recovery read the distortion as the character's
+  proportions, and the retargeter's hip-height scaling carried it into the animated
+  GLB — the "terrible scales". The keyframe render, the H3 canvas and the LTX canvas
+  now share one orientation, pinned by a test so they cannot drift apart again.
 - **One warm Colab VM for the whole lab, with the other backends installing onto it while
   a job runs.** Every step's next click used to pay the same 15–30 minute VM install the
   last one did. Jobs now land on one shared session (`i2l-lab`), started by the first job

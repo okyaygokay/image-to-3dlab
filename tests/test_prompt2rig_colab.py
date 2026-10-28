@@ -137,8 +137,9 @@ def test_ltx2s_prompt_is_one_long_paragraph_with_the_same_framing():
 
 
 def test_the_video_engine_picks_who_acts_the_prompt_out(monkeypatch, tmp_path):
-    """`--video-engine h3` swaps the video stage; every later stage is engine-agnostic
-    because both engines land at 24 fps. LTX-2.5 is the default — it won the A/B."""
+    """`--video-engine ltx2` swaps the video stage; every later stage is engine-agnostic
+    because both engines land at 24 fps. H3 is the default — a preference call, even
+    though LTX-2.5 won the A/B's clean-report metrics."""
     calls = {}
 
     def fake_h3(prompt, seconds, seed, out, keyframe):
@@ -149,13 +150,13 @@ def test_the_video_engine_picks_who_acts_the_prompt_out(monkeypatch, tmp_path):
 
     monkeypatch.setattr(p2r, "generate_h3", fake_h3)
     monkeypatch.setattr(p2r, "generate_ltx2", fake_ltx2)
-    p2r.generate_clip("swinging a sword", 6, 7, tmp_path / "a.mp4", None, "h3")
+    p2r.generate_clip("swinging a sword", 6, 7, tmp_path / "a.mp4", None, "ltx2")
     p2r.generate_clip("swinging a sword", 6, 8, tmp_path / "b.mp4", None)
-    assert list(calls) == ["h3", "ltx2"] and calls["h3"][1] == 7 and calls["ltx2"][1] == 8
+    assert list(calls) == ["ltx2", "h3"] and calls["ltx2"][1] == 7 and calls["h3"][1] == 8
     # an already-generated clip answers to neither engine
     (tmp_path / "have.mp4").write_bytes(b"clip")
     p2r.generate_clip("swinging a sword", 6, 9, tmp_path / "have.mp4", None, "ltx2")
-    assert calls["ltx2"] == ("swinging a sword", 8)
+    assert calls["ltx2"] == ("swinging a sword", 7)
 
 
 def test_ltx2_installs_on_demand_once(monkeypatch, tmp_path):
@@ -188,9 +189,24 @@ def test_ltx2_installs_on_demand_once(monkeypatch, tmp_path):
 
 
 def test_the_video_engine_flag_parses():
-    """The studio forwards the engine after `--`; LTX-2.5 is the default — it won the
-    A/B that decided (a quarter of H3's shimmer, far cleaner fingers, hands tracked
-    97%/100% vs 82%/91%)."""
+    """The studio forwards the engine after `--`; H3 is the default (a preference
+    call, even though LTX-2.5 won the A/B's clean-report metrics)."""
     argv = ["r.glb", "a.glb", "--prompt", "x"]
-    assert p2r.parse(argv + ["--video-engine", "h3"]).video_engine == "h3"
-    assert p2r.parse(argv).video_engine == "ltx2"
+    assert p2r.parse(argv + ["--video-engine", "ltx2"]).video_engine == "ltx2"
+    assert p2r.parse(argv).video_engine == "h3"
+
+
+def test_every_stage_shares_one_landscape_canvas():
+    """H3 stretches the rig keyframe onto its canvas and LTX resizes the keyframe to
+    its own, so the keyframe render, the H3 canvas and the LTX canvas must agree on
+    orientation. H3's tuple was once (960, 544) read height-first — a portrait frame
+    that squashed every keyframed clip's actor to 57% width and 1.76× height, which
+    motion recovery then read as the character's proportions (found live: "the
+    generated video's scales are terrible")."""
+    import hero_blender
+    import ltx2_video
+
+    assert p2r.CANVAS == (544, 960)                        # height, width — landscape
+    assert hero_blender.still.__defaults__ == (960, 544)   # width, height
+    assert ltx2_video.generate.__defaults__[-2:] == (960, 544)
+    assert p2r.CANVAS[1] / p2r.CANVAS[0] == 960 / 544      # one aspect, three places
