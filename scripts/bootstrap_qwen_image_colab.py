@@ -24,9 +24,12 @@ require an affirmative answer. This prints all of that and stops, unless `--yes`
 from __future__ import annotations
 
 import argparse
+import hashlib
 import shlex
+import shutil
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -128,12 +131,43 @@ def install_weights() -> None:
          what="fetching the Qwen-Image weights", timeout=7200)
 
 
+def install_edit_mode() -> None:
+    """What a back view drawn on the VM needs: the vision projector and the matte.
+
+    Edit mode reads the reference picture through the vision projector (0.75 GB, the
+    local route's own pins via --vision), and the reference is the front's cut-out —
+    BiRefNet-lite (224 MB), the matte the whole repo trusts with thin parts, from
+    matte.py's pinned URL and md5. Without this step the draw falls back to u2net,
+    which can eat thin parts out of the reference Qwen then faithfully redraws missing.
+    """
+    from image_to_3dlab import matte
+
+    must([str(venv_python()), str(BOOTSTRAP), "--vision", "--yes"],
+         what="fetching the Qwen vision projector (edit mode)", timeout=3600)
+    target = matte.model_file(matte.LITE_MODEL)
+    if target.is_file():
+        print(f"  {matte.LITE_MODEL} already present; leaving it alone", flush=True)
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    print(f"  fetching {matte.LITE_MODEL} ({matte.LITE_BYTES / 1e9:.2f} GB), md5-checked",
+          flush=True)
+    with urllib.request.urlopen(matte.LITE_URL, timeout=600) as response, target.open("wb") as out:
+        shutil.copyfileobj(response, out)
+    digest = hashlib.md5(target.read_bytes()).hexdigest()
+    if digest != matte.LITE_MD5:
+        target.unlink(missing_ok=True)
+        raise SystemExit(f"{matte.LITE_MODEL} failed its md5 check ({digest}); retry the job")
+    print(f"  installed {target}", flush=True)
+
+
 def announcement() -> str:
     return "\n".join([
         "", "About to install:", "",
         "  backend: Qwen-Image (text to picture), stable-diffusion.cpp",
         "  route:   this rented Colab VM, into vendor/sdcpp/",
-        f"  size:    about {WEIGHTS_GB:.1f} GB of weights, plus a CUDA compile (~10 min)",
+        f"  size:    about {WEIGHTS_GB:.1f} GB of weights, plus a CUDA compile (~10 min),",
+        "           plus ~1.0 GB for edit mode (the vision projector and BiRefNet-lite,",
+        "           which back views drawn on this VM need)",
         "  source:  leejet/stable-diffusion.cpp at " + PINNED_REF + " (compiled here:",
         "           upstream publishes no Linux CUDA build), and the pinned Qwen-Image",
         "           files from Hugging Face via bootstrap_qwen_image.py",
@@ -162,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     install_python_packages()
     install_binary()
     install_weights()
+    install_edit_mode()
     BUILT_MARKER.write_text("ok")
 
     print("\nDone. Draw with:\n"

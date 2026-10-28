@@ -102,7 +102,7 @@ def test_the_file_says_its_camera_was_fitted_not_saved_by_a_maker(tmp_path):
                                        tmp_path / "views")
     meta = json.loads((fitted / "transforms.json").read_text())
     assert "fitted" in meta and meta["mesh_scale"] == 1.0
-    assert meta["figure_box"] == [100, 299, 200, 499]   # what the camera was fitted to
+    assert meta["frames"][0]["figure_box"] == [100, 299, 200, 499]   # what it was fitted to
     assert meta["frames"][0]["file_path"] == "picture.png"
     assert (fitted / "picture.png").is_file()           # the view is self-contained
 
@@ -113,3 +113,61 @@ def test_an_unreadable_mesh_raises_rather_than_writing_a_bogus_camera(tmp_path):
     with pytest.raises(ValueError):
         front_view.fit_front_view(broken, _figure_picture(tmp_path), tmp_path / "views")
     assert not (tmp_path / "views" / "transforms.json").is_file()
+
+
+def _bumped_model(tmp_path: Path) -> Path:
+    """A box with a bump on GLB +X — asymmetric, so a camera that walks round the model
+    can be told from one that mirrors it."""
+    import trimesh
+
+    bump = trimesh.creation.box(extents=(0.5, 0.5, 0.5))
+    bump.apply_translation([1.2, 0.0, 0.0])            # sticks out on GLB +X
+    model = tmp_path / "bumped.glb"
+    trimesh.util.concatenate([trimesh.creation.box(extents=(2.0, 3.0, 1.0)), bump]).export(model)
+    return model
+
+
+def test_two_views_share_one_file_and_both_frame_the_model(tmp_path):
+    """A front and a back picture fit into one transforms.json — the same shape a
+    .svviews directory has — with each camera framing the whole model in its own
+    picture and nothing clipped."""
+    import trimesh
+
+    model = _box_model(tmp_path)
+    front, back = _figure_picture(tmp_path), tmp_path / "back.png"
+    Image.new("RGB", (400, 600), (25, 25, 25)).save(back)
+
+    fitted = front_view.fit_views(model, [(front, "front"), (back, "back")], tmp_path / "views")
+
+    views, mesh_scale = pp.load_views(fitted)
+    assert mesh_scale == 1.0 and len(views) == 2
+    assert [v.name for v in views] == ["front (fitted)", "back (fitted)"]
+    assert (fitted / "picture.png").is_file() and (fitted / "back.png").is_file()
+    lo, hi = np.asarray(trimesh.load(model, force="scene", process=False).bounds)
+    corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
+                        for z in (lo[2], hi[2])], dtype=np.float64)
+    for view in views:
+        x, y, depth = pp.project(pp.to_view_space(corners), view)
+        # a full-frame box meets the frame's edge exactly; a pixel's half-centre can
+        # poke past the last pixel's centre — sub-pixel, against the fit's ~25 px live error
+        assert (depth > 0).all() and (x >= -1).all() and (x <= 401).all()
+        assert (y >= -1).all() and (y <= 601).all()
+
+
+def test_the_back_camera_walks_round_the_model_rather_than_mirroring_it(tmp_path):
+    """A bump on GLB +X sits picture-right from the front and picture-left from the
+    back — the way a real person's features swap sides when you walk round them. A
+    mirrored back camera would paint the other side's pixels onto the bump."""
+    model = _bumped_model(tmp_path)
+    front, back = _figure_picture(tmp_path), tmp_path / "back.png"
+    Image.new("RGB", (400, 600), (25, 25, 25)).save(back)
+
+    fitted = front_view.fit_views(model, [(front, "front"), (back, "back")], tmp_path / "views")
+    front_view_cam, back_cam = pp.load_views(fitted)[0]
+
+    bump = pp.to_view_space(np.array([[1.2, 0.0, 0.0]]))   # the bump's centre, GLB +X
+    fx, _, fdepth = pp.project(bump, front_view_cam)
+    bx, _, bdepth = pp.project(bump, back_cam)
+    assert (fdepth > 0).all() and (bdepth > 0).all()       # both cameras see it
+    assert fx[0] > 200                                     # front: picture-right of centre
+    assert bx[0] < 200                                     # back: picture-left of centre

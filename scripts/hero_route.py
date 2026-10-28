@@ -46,6 +46,7 @@ PYTHON = Path(sys.executable)
 GENERATE = REPO / "scripts" / "pixal3d_generate.py"
 FINISH = REPO / "scripts" / "retopo_repaint.py"
 UPSCALE = REPO / "scripts" / "upscale_esrgan.py"
+BACK_VIEW = REPO / "scripts" / "make_back_view.py"
 COLAB = REPO / "scripts" / "colab_generate.py"
 BLENDER = REPO / "scripts" / "hero_blender.py"
 COMPRESS = REPO / "scripts" / "compress_glb_textures.py"
@@ -250,6 +251,22 @@ def upscale_command(colab: bool, crop: Path, upscaled: Path, size: int = 1024) -
             "--", "{in}", "{out}", "--size", str(size)]
 
 
+def back_view_command(colab: bool, front: Path, back: Path) -> list[str]:
+    """The body's back picture: drawn from the front by Qwen in edit mode, here or on the VM.
+
+    A back is what a *foreign* body (Hi3D, TRELLIS, ...) paints its back with — the
+    engine's own texture stops at the front where the real picture takes over, and a
+    mirrored smear is not a back. Drawn at the tested seed; the provenance and the
+    grey-backdrop reference land beside the picture either way.
+    """
+    if not colab:
+        return [PYTHON, BACK_VIEW, front, back]
+    return [PYTHON, "-u", COLAB, "--backend", "qwen_image", "--exec", "scripts/make_back_view.py",
+            "--exec-input", front, "--exec-output", back,
+            "--exec-artifacts", f"{back.stem}.provenance.json", f"{back.stem}__reference.png",
+            "--keep", "--yes", "--", "{in}", "{out}"]
+
+
 #: The shots the check renders beside its first one (hero_blender names them itself).
 CHECK_SHOTS = ("head_three_quarter.png", "head_side.png", "head_back.png",
                "body_front.png", "body_three_quarter.png", "body_side.png")
@@ -294,19 +311,22 @@ def replay_command(colab: bool, dump: Path, output: Path, faces: int, atlas: int
 
 
 def finish(run: Run, model: Path, picture: Path, views: Path | None, out: Path, faces: int,
-           dump: Path | None, classic: bool = False) -> None:
+           dump: Path | None, classic: bool = False, back: Path | None = None) -> None:
     """Finish one model: retopo to FACES, and Pixel Match when a camera exists for it.
 
-    `views` is None for a body from another engine (no .svviews behind it): a front
-    camera is then fitted to the body so Pixel Match still paints the front from the
-    picture (the head's calls always bring their own views, so None can only mean a
-    foreign body). `dump` is None when the body is not a Pixal3D model: the clean-up is
-    the classic route. A Pixal3D body whose dump was lost still keeps its mesh
+    `views` is None for a body from another engine (no .svviews behind it): cameras are
+    then fitted to the body so Pixel Match still paints it — the front from the picture,
+    and the back too when `back` names one (drawn or supplied). The head's calls always
+    bring their own views, so None can only mean a foreign body, and they pass no back:
+    the head crop has no back to draw. `dump` is None when the body is not a Pixal3D
+    model: the clean-up is the classic route — which a *bare* foreign body (Hi3D, no UVs,
+    no paint) needs anyway, `classic` or not, and main() passes it explicitly so the
+    resurface is said in the run. A Pixal3D body whose dump was lost still keeps its mesh
     (--keep-mesh), as before. `classic` forces the classic clean-up even on a Pixal3D
     model — the head's fallback when post-replay fails.
     """
     if views is None:
-        views = fitted_front_views(run, model, picture, out)
+        views = fitted_body_views(run, model, picture, back, out)
     command = [PYTHON, "-u", FINISH, model, picture, out, "--steps-dir", out.with_suffix(".steps"),
                "--faces", str(faces), *FINISH_FLAGS]
     if views is not None:
@@ -323,24 +343,66 @@ def finish(run: Run, model: Path, picture: Path, views: Path | None, out: Path, 
                  "objected; see run.log): hair and thin parts can shatter")
 
 
-def fitted_front_views(run: Run, model: Path, picture: Path, out: Path) -> Path | None:
-    """A camera for a body whose maker saved none, or None when even fitting fails.
+def fitted_body_views(run: Run, model: Path, picture: Path, back: Path | None,
+                      out: Path) -> Path | None:
+    """Cameras for a body whose maker saved none, or None when even fitting fails.
 
-    The body keeps its own texture in that case, as before. `finish` is the only
-    caller, and the head never reaches here: its two calls always bring the head run's
-    own views.
+    One camera per picture — the front always, the back when one exists (drawn by Qwen
+    from the front, or supplied) — so Pixel Match paints the front from the real photo
+    and the back from the back picture, the same "on (front + back)" a two-view Pixal3D
+    run gets. Each picture is cut out first unless it already is: a maker's view
+    pictures are cut-outs, and Pixel Match reads the alpha as its matte — an opaque
+    picture would paint its background (near-black, drawn grey) wherever the mesh
+    projects past the figure. The body keeps its own texture when even fitting fails,
+    as before. `finish` is the only caller, and the head never reaches here: its two
+    calls always bring the head run's own views.
     """
-    from image_to_3dlab.front_view import fit_front_view
+    from image_to_3dlab.front_view import fit_views
 
+    pictures = [(cutout_picture(run, picture), "front")] + (
+        [(cutout_picture(run, back), "back")] if back else [])
     try:
-        fitted = fit_front_view(model, picture, out.with_suffix(".front-views"))
+        fitted = fit_views(model, pictures, out.with_suffix(".fitted-views"))
     except Exception as exc:  # an unreadable mesh must not sink the whole run
-        run.flag(f"could not fit a front camera to {model.name} ({exc}); "
+        run.flag(f"could not fit cameras to {model.name} ({exc}); "
                  f"Pixel Match on the body is skipped")
         return None
-    run.flag("the body's maker saved no cameras, so a front camera was fitted to it: "
-             "Pixel Match paints the front from the picture (a fitted camera, not the maker's)")
+    run.flag("the body's maker saved no cameras, so " +
+             ("front and back cameras were" if back else "a front camera was") +
+             " fitted to it: Pixel Match paints the " +
+             ("front from the picture and the back from the back picture"
+              if back else "front from the picture") +
+             " (fitted cameras, not the maker's)")
     return fitted
+
+
+def cutout_picture(run: Run, picture: Path) -> Path:
+    """`picture` as a cut-out, or itself when it already is one.
+
+    The cut-out lands beside the picture at `<stem>_cutout.png` — the very name the
+    hero route's own cut-out step gives the front picture, so an existing cut-out is
+    reused rather than redone. Cutting needs the matte the cut-out step already used;
+    a picture that cannot be cut is passed through as it is, and the silhouette fade
+    keeps its background off the mesh except right at the edge.
+    """
+    from PIL import Image
+
+    from image_to_3dlab import matte
+
+    with Image.open(picture) as opened:
+        if matte.is_matted(opened):
+            return picture
+    cut = picture.with_name(f"{picture.stem}_cutout.png")
+    if not cut.is_file():
+        try:
+            image, used = matte.cut_out(Image.open(picture).convert("RGB"))
+            image.save(cut)
+            run.say(f"cut out {picture.name} with {used} for Pixel Match")
+        except Exception as exc:               # the picture itself is still usable
+            run.flag(f"could not cut out {picture.name} ({exc}); Pixel Match paints from "
+                     f"it as it is, background and all")
+            return picture
+    return cut
 
 
 def head_cleanup(run: Run, raw: Path, out: Path, faces: int, colab: bool = False) -> bool:
@@ -463,18 +525,22 @@ def main() -> int:
     # 1. body
     body_raw = out / "body_raw.glb"
     stage(run, "body", "Building the body" if not args.body else "Finishing the body")
+    body_classic = False
     if args.body and not body_raw.exists():
         # The studio's own 3D model of this picture: no second Pixal3D run for the body.
         stage_body_inputs(args.body, args.body_views, args.body_dump, args.body_record, body_raw)
-        if bare_geometry(body_raw) and not (body_raw.with_suffix(".svviews") / "transforms.json").is_file():
-            # A body with no paint of its own and no cameras to match from (Hi3D ships
-            # geometry only) would finish to a flat grey under the sharp new head. Build
-            # the body from the picture instead -- it paints all round -- then the head.
-            run.say(f"body: {args.body.name} paints nothing of its own (Hi3D ships "
-                    "geometry only), so the body is built from the picture, then the head")
-            body_raw.unlink()
-        else:
-            run.say(f"body: using {args.body}")
+        run.say(f"body: using {args.body}")
+    if args.body and bare_geometry(body_raw) \
+            and not (body_raw.with_suffix(".svviews") / "transforms.json").is_file():
+        # Geometry only (Hi3D): no UVs, no paint, nowhere to put pixels — a direct Pixel
+        # Match has no atlas to paint into (a smart-UV unwrap of the engine's own million
+        # faces fragmented to ~1% of the texture, 2026-10-28). Finish's classic route
+        # resurfaces it — the voxel remesh keeps its shape at the route's own face count,
+        # with a dense atlas — and the fitted cameras paint it from the photo, front and
+        # drawn back. The old way (build the body again with Pixal3D) threw the shape away.
+        body_classic = True
+        run.say(f"body: {args.body.name} paints nothing of its own (Hi3D ships geometry "
+                "only), so it keeps its shape, resurfaced, and is painted from the picture")
     if run.step("body: Pixal3D", body_raw):
         run.run(pixal_command(colab, picture, body_raw, "--seed", str(args.seed),
                               *(["--back", str(back)] if back else [])))
@@ -482,8 +548,24 @@ def main() -> int:
     body_views = body_raw.with_suffix(".svviews")
     have_views = (body_views / "transforms.json").is_file()
     dump = body_raw.with_suffix(".post.bin")
-    label = f"body: Finish {args.body_faces}" + (" + Pixel Match" if have_views
-                                                 else " (its own texture)")
+    body_back = back
+    if not have_views and body_back is None:
+        # A foreign body paints through fitted cameras — the front from the real
+        # picture, the back from one drawn by Qwen from that photo (a supplied --back
+        # was already used for the build and is reused here). Best-effort: a body whose
+        # back could not be drawn still gets its front painted.
+        body_back = out / "drawn-back.png"
+        if run.step("body: back view", body_back) and not run.run(
+                back_view_command(colab, picture, body_back), required=False):
+            run.flag("the back picture could not be drawn; Pixel Match paints the "
+                     "body's front only (its sides and back keep the engine's texture)")
+        if not body_back.is_file():
+            body_back = None
+    label = f"body: Finish {args.body_faces}"
+    if have_views:
+        label += " + Pixel Match"
+    else:  # a foreign body: cameras fitted to it — the front from the photo, the back when drawn
+        label += " + Pixel Match (front" + (" + drawn back" if body_back else "") + ")"
     if run.step(label, body):
         # A body this run just built with Pixal3D always has its dump; missing means the
         # build predates the patch, and the classic route would shatter its hair exactly
@@ -492,7 +574,8 @@ def main() -> int:
         if not args.body and not dump.is_file():
             raise SystemExit(f"[hero] {NO_DUMP}")
         finish(run, body_raw, picture, body_views if have_views else None, body,
-               args.body_faces, dump if dump.is_file() else None)
+               args.body_faces, dump if dump.is_file() else None,
+               classic=body_classic, back=body_back)
 
     # 2. measure
     stage(run, "measure", "Finding the head")

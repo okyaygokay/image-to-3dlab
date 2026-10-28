@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A Hero body from any engine takes the picture's pixels front *and back*.** The
+  front-camera fit (below) painted only the front; the sides and back kept the engine's
+  own texture. The hero route now draws a back picture from the front photo — Qwen in
+  edit mode, the tested eight-character prompt and seed, run locally or on the rented
+  VM through the `qwen_image` backend's `--exec` leg (the Colab bootstrap grew the
+  vision projector and BiRefNet-lite edit mode needs, ~1 GB) — and fits a second
+  camera, half a turn round, to the same mesh. Pixel Match then paints the back with
+  the drawn photo's pixels, the same "on (front + back)" a two-view Pixal3D run gets.
+  Each picture is cut out first (Pixel Match reads the alpha as its matte; an opaque
+  background would paint itself wherever the mesh projects past the figure). The draw
+  is best-effort: a back that fails to draw leaves the front painted and the run flags
+  it, never sinking the body. A supplied `--back` is reused as that picture.
+- **A bare body keeps its shape instead of being built again.** A body that ships
+  geometry only (Hi3D) used to be thrown away and rebuilt from the picture with
+  Pixal3D, because a direct Pixel Match had no atlas to paint into (a smart-UV unwrap
+  of the engine's own million faces fragmented to ~1% of the texture). It is now
+  resurfaced by Finish's classic route — the voxel remesh keeps its shape at the
+  route's own face count, with a dense atlas — and the fitted cameras paint it from
+  the photo, front and drawn back, exactly as a textured foreign body is painted.
 - **A Hero body from any engine takes the picture's pixels too.** A Hero face on a
   Hi3D/TRELLIS body used to leave the whole body on the engine's own texture: those
   runs save no cameras, so Pixel Match had nothing to paint through. The hero route now
