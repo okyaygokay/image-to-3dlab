@@ -38,8 +38,11 @@ import fixspot_api
 import hf_api
 import image_api
 import model_info_api
+import notices_api
 import preview_api
+import request_utils
 import skins_api
+import studio_auth
 import usage_api
 from activity_api import ChainRunner, chain_from_form, read_history
 from assets_api import assets_payload, list_assets
@@ -172,11 +175,14 @@ from rig_api import (
 from update_api import check as update_check
 from welcome_api import payload as welcome_payload
 
-from image_to_3dlab import processes
+from image_to_3dlab import models_home, processes
 from image_to_3dlab.blender import find_blender
 from image_to_3dlab.blender import missing_help as blender_missing_help
 from image_to_3dlab.gpu_memory import gpu_busy_note
-from image_to_3dlab.host import executable  # image_api put the repo on sys.path
+from image_to_3dlab.host import (
+    executable,  # image_api put the repo on sys.path
+    find_uv,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 WRAPPER = REPO / "scripts" / "trellis_space_generate.py"
@@ -241,11 +247,14 @@ TINYCLIP_TIMEOUT_SECONDS = 300
 HUNYUAN_WRAPPER = REPO / "scripts" / "hunyuan_mlx_generate.py"
 HUNYUAN_PYTHON = REPO / "vendor" / "hunyuan-mlx" / ".venv" / "bin" / "python"
 PIXAL3D_ROOT = REPO / "vendor" / "pixal3d-cpp"
+# The models folder this run uses; a new choice in Setup waits for the next start.
+MODELS_STARTED_WITH = models_home.apply()
+MODELS_SETTING_REPO = REPO   # where output/.models-folder is kept; tests point it at a temp folder
 PIXAL3D_CLI = executable(PIXAL3D_ROOT / "build", "trellis-cli")
-PIXAL3D_MODELS = PIXAL3D_ROOT / "models" / "pixal3d-sv"
+PIXAL3D_MODELS = models_home.vendor_models("pixal3d-cpp") / "pixal3d-sv"
 PIXAL3D_WRAPPER = REPO / "scripts" / "pixal3d_generate.py"
 # Front + back: the multi-view set (scripts/bootstrap_pixal3d.py --multiview).
-PIXAL3D_MV_MODELS = PIXAL3D_ROOT / "models" / "pixal3d-q8_0-v1"
+PIXAL3D_MV_MODELS = models_home.vendor_models("pixal3d-cpp") / "pixal3d-q8_0-v1"
 
 # Routes that cut their own picture out with our remover (image_to_3dlab/matte.py), so the
 # server need not (requires_alpha=False). (backend id, host or None for any) -> the file
@@ -323,7 +332,7 @@ def _job_env() -> dict[str, str]:
     value in this server's environment (e.g. SPARSE_CONV_BACKEND=none exported earlier)
     would otherwise be inherited and silently break the run.
     """
-    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    env = processes.child_env()
     for key in BACKEND_ENV_KEYS:
         env.pop(key, None)
     return env
@@ -455,7 +464,7 @@ def mlx_attention_status(vendor: Path | None = None, dispatch: Path | None = Non
     vendor = vendor or TRELLIS_VENDOR
     dispatch = dispatch or MLX_DISPATCH_FILE
     try:
-        patched = dispatch.is_file() and MLX_DISPATCH_MARKER in dispatch.read_text()
+        patched = dispatch.is_file() and MLX_DISPATCH_MARKER in dispatch.read_text(encoding="utf-8")
     except OSError:
         patched = False
     package = any((vendor / ".venv" / "lib").glob("python*/site-packages/mlx"))
@@ -654,8 +663,8 @@ def run_trellis_input_advisor(image_path: Path) -> dict[str, Any]:
             env=_job_env(),
             check=True,
             capture_output=True,
-            text=True,
             timeout=TINYCLIP_TIMEOUT_SECONDS,
+            **processes.TEXT_PIPE,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("TinyCLIP input check timed out") from exc
@@ -707,7 +716,7 @@ def setup_available(host: str | None = None) -> tuple[bool, str | None]:
     if (host or host_platform()) != APPLE:
         return False, ("this setup runs the Mac port; on this machine use Setup & Status "
                        "> TRELLIS.2 > Set up")
-    if shutil.which("uv") is None:
+    if find_uv() is None:
         return False, "uv is not installed — install it first (https://docs.astral.sh/uv/)"
     bootstrap = REPO / "scripts" / "bootstrap_trellis_space_macos.py"
     if not bootstrap.is_file():
@@ -978,7 +987,7 @@ def image_border_opaque_fraction(path: Path) -> float | None:
 
 def _read_seconds(path: Path) -> dict[str, float]:
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         seconds = data.get("seconds", data.get("stages", {}))
         return {str(k): float(v) for k, v in seconds.items() if v is not None}
     except (OSError, ValueError, TypeError, AttributeError):
@@ -999,7 +1008,7 @@ def _update_baseline(job: Job) -> None:
     data = {"schema_version": 1, "seconds": seconds,
             "source": "learned from completed Generate jobs on this machine"}
     LEARNED_BASELINE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    LEARNED_BASELINE_PATH.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    LEARNED_BASELINE_PATH.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _slugify(value: str) -> str:
@@ -1215,7 +1224,7 @@ def _process_rss_gb(pid: int) -> float:
     try:
         kb = subprocess.run(
             ["ps", "-o", "rss=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=5, check=False,  # best-effort probe
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=False,  # best-effort probe
         ).stdout.strip()
         return round(int(kb) / (1024 ** 2), 2) if kb.isdigit() else 0.0
     except (OSError, ValueError, subprocess.TimeoutExpired):
@@ -1298,7 +1307,7 @@ def _write_pid_file(directory: Path, pid: int) -> None:
     dying (memory-only Job/JobManager state does not) -- see _reconcile_orphaned_jobs,
     which reads this file back on the next server startup to find and clean up jobs
     whose tracker died mid-run."""
-    _pid_file_path(directory).write_text(processes.pid_record(pid))
+    _pid_file_path(directory).write_text(processes.pid_record(pid), encoding="utf-8")
 
 
 def _remove_pid_file(directory: Path) -> None:
@@ -1407,7 +1416,7 @@ def _reconcile_orphaned_jobs(output_root: Path) -> list[str]:
             continue    # a folder that happens to be called pid (a prop, say), not a job's
         directory = pid_file.parent
         try:
-            pid, owner = processes.parse_pid_record(pid_file.read_text())
+            pid, owner = processes.parse_pid_record(pid_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             pid_file.unlink(missing_ok=True)
             continue
@@ -2093,7 +2102,7 @@ def pixal3d_front_back_ready(models: Path = PIXAL3D_MV_MODELS) -> tuple[bool, st
     if not listing.is_file():
         return False, ("Front + back needs Pixal3D's multi-view weights (5.9 GB). Get them from "
                        "Setup & Status, or run python scripts/bootstrap_pixal3d.py --multiview.")
-    required = [entry["name"] for entry in json.loads(listing.read_text()).get("files", [])
+    required = [entry["name"] for entry in json.loads(listing.read_text(encoding="utf-8")).get("files", [])
                 if entry.get("required", True)]
     missing = [name for name in required if not (models / name).is_file()]
     if missing:
@@ -2912,6 +2921,9 @@ class Handler(SimpleHTTPRequestHandler):
     def _path_parts(self) -> list[str]:
         return [unquote(p) for p in urlparse(self.path).path.split("/") if p]
 
+    # the key a studio reachable from a network needs (studio_auth); None on 127.0.0.1. Set by serve.py.
+    studio_token: ClassVar[str | None] = None
+
     # one runner per server: it calls this server's own job endpoints, so a plan keeps going
     # after the browser tab that started it is closed
     _chain_runner: ClassVar[ChainRunner | None] = None
@@ -2921,17 +2933,62 @@ class Handler(SimpleHTTPRequestHandler):
         if cls._chain_runner is None:
             host, port = self.server.server_address[:2]
             host = "127.0.0.1" if host in ("", "0.0.0.0") else host
-            cls._chain_runner = ChainRunner(OUTPUT_ROOT, activity_api.local_request(f"http://{host}:{port}"))
+            cls._chain_runner = ChainRunner(OUTPUT_ROOT, activity_api.local_request(f"http://{host}:{port}", cls.studio_token))
         return cls._chain_runner
 
     def send_response(self, code, message=None) -> None:
         self._status_code = int(code)   # what note_request counts a POST by
         super().send_response(code, message)
 
+    def _refuse(self, status: int, message: str) -> None:
+        # read a small body first: closing on unread bytes resets the connection, and the
+        # caller would see a network error instead of the reason
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if 0 < length <= 1024 * 1024:
+            self.rfile.read(length)
+        else:
+            self.close_connection = True
+        self._send_json(status, {"error": message})
+
+    def _allowed(self, *, mutation: bool) -> bool:
+        """The studio page's own requests and local tools only (request_utils.check_request),
+        with the studio's key when it is reachable from a network (studio_auth)."""
+        verdict = studio_auth.check(token=type(self).studio_token, path=self.path, headers=self.headers)
+        if not verdict.ok:
+            self._refuse(401, "This studio needs its key: open the link it printed when it started "
+                              "(the one ending in ?token=...).")
+            return False
+        if verdict.redirect:
+            # the key came in the address: keep it in a cookie and drop it from the address bar
+            self.send_response(HTTPStatus.FOUND)
+            self.send_header("Location", verdict.redirect)
+            self.send_header("Set-Cookie", verdict.set_cookie)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
+        if studio_auth.hidden_path(self.path):
+            self._refuse(404, "Not found")
+            return False
+        try:
+            request_utils.check_request(self, mutation=mutation)
+        except PermissionError as exc:
+            self._refuse(403, str(exc))
+            return False
+        return True
+
+    def do_HEAD(self) -> None:
+        if self._allowed(mutation=False):
+            super().do_HEAD()
+
     def do_POST(self) -> None:
         self._status_code = None
         try:
-            self._route_post()
+            # every POST changes something: weights, the HF token, jobs, names
+            if self._allowed(mutation=True):
+                self._route_post()
         finally:
             usage_api.note_request(self._path_parts(), self.headers.get(usage_api.CLIENT_HEADER),
                                    "POST", self._status_code)
@@ -2983,6 +3040,16 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parts == ["api", "blender", "install"]:
             self._start_blender_install()
+            return
+        if parts == ["api", "models-folder"]:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length)) if 0 < length <= 4096 else {}
+                models_home.save(str(payload.get("path") or ""), MODELS_SETTING_REPO)
+            except (ValueError, json.JSONDecodeError, AttributeError) as exc:
+                self._send_json(422, {"error": str(exc) or "send {\"path\": \"/full/path\"}"})
+                return
+            self._send_json(200, models_home.describe(MODELS_STARTED_WITH, MODELS_SETTING_REPO))
             return
         if parts == ["api", "gltfpack", "install"]:
             self._start_gltfpack_install()
@@ -3113,10 +3180,30 @@ class Handler(SimpleHTTPRequestHandler):
         if parts == ["api", "usage"]:
             self._usage_choice()
             return
+        if parts == ["api", "notices", "read"]:
+            # {ids: [...]}: the bell's notices the person has now seen
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length)) if 0 < length <= 4096 else {}
+            except ValueError:
+                body = {}
+            ids = body.get("ids") if isinstance(body, dict) else None
+            notices_api.mark_read(ids if isinstance(ids, list) else [])
+            self._send_json(200, self._notices())
+            return
         if len(parts) == 4 and parts[:2] == ["api", "image"] and parts[3] == "cancel":
             self._cancel_image_job(parts[2])
             return
         self.send_error(HTTPStatus.NOT_FOUND)
+
+    def _notices(self) -> dict:
+        """The bell's notices: ours from the site, plus a newer release (notices_api)."""
+        import image_to_3dlab
+        try:
+            update = update_check()
+        except Exception:
+            update = None
+        return notices_api.notices(image_to_3dlab.__version__, update)
 
     def _create_back_job(self) -> None:
         """Draw the back of a picture already in output/ (front + back builds)."""
@@ -3441,6 +3528,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_GET(self) -> None:
+        if not self._allowed(mutation=False):
+            return
         if self.headers.get(usage_api.CLIENT_HEADER):
             usage_api.note_request(self._path_parts(), self.headers.get(usage_api.CLIENT_HEADER), "GET", None)
         if urlparse(self.path).path in ("", "/", "/viewer", "/viewer/"):
@@ -3452,6 +3541,9 @@ class Handler(SimpleHTTPRequestHandler):
         if parts[:2] == ["api", "skins"]:
             self._skins_get(parts[2:])
             return
+        if parts == ["api", "models-folder"]:
+            self._send_json(200, models_home.describe(MODELS_STARTED_WITH, MODELS_SETTING_REPO))
+            return
         if parts == ["api", "hf", "status"]:
             self._send_json(200, hf_api.status())
             return
@@ -3461,7 +3553,7 @@ class Handler(SimpleHTTPRequestHandler):
         if parts == ["api", "recipes"]:
             # what we know about prompting each goal; the CLI and MCP read the same file
             try:
-                self._send_json(200, json.loads((REPO / "image_to_3dlab" / "prompt_recipes.json").read_text()))
+                self._send_json(200, json.loads((REPO / "image_to_3dlab" / "prompt_recipes.json").read_text(encoding="utf-8")))
             except (OSError, ValueError) as exc:
                 self._send_json(500, {"error": f"prompt recipes unreadable: {exc}"})
             return
@@ -3520,6 +3612,9 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parts == ["api", "update-check"]:
             self._send_json(200, update_check())
+            return
+        if parts == ["api", "notices"]:
+            self._send_json(200, self._notices())
             return
         if parts == ["api", "usage"]:
             usage_api.send_soon()   # asked once per page load; at most one message a day goes out

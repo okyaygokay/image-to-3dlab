@@ -49,6 +49,14 @@ a { color: inherit; }
 .brand b { font: 800 15px/1 var(--f-display); letter-spacing: -.01em; color: var(--bone); }
 .brand b span { color: var(--ember); }
 .bar .spacer { flex: 1; }
+.news-count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--ember); color: #1a0d06; font: 700 11px/18px var(--f-num); text-align: center; }
+.news-btn.has-news { border-color: var(--ember); color: var(--bone); }
+.notices { display: grid; gap: 10px; }
+.notice { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.notice.unread { border-color: var(--ember); }
+.sheet-card .notice h3 { margin: 0 0 4px; font: 700 15px/1.3 var(--f-body); letter-spacing: 0; text-transform: none; color: var(--bone); }
+.notice p { margin: 0 0 6px; color: var(--ash); white-space: pre-wrap; }
+.notice .new { margin-left: 6px; font: 600 10px/1 var(--f-num); letter-spacing: .08em; color: var(--ember); }
 .ghost { display: inline-flex; align-items: center; gap: 6px; background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: 6px 11px; color: var(--ash); text-decoration: none; }
 .ghost:hover { color: var(--bone); border-color: var(--line-hi); }
 .primary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: var(--ember); color: #1b0b02; border: 0; border-radius: 10px; padding: 11px 14px; font-weight: 600; text-decoration: none; }
@@ -258,6 +266,8 @@ textarea { width: 100%; background: #110d0b; border: 1px solid var(--line); bord
 .wants.faces { grid-template-columns: repeat(2, 1fr); }
 .hero-card { border: 1px solid var(--ember); border-radius: 12px; padding: 12px; margin-bottom: 12px; display: grid; gap: 10px; }
 .hero-card p { margin: 0; font-size: 13px; color: var(--bone); line-height: 1.45; }
+.hero-card.off { border-color: var(--line-hi); }
+.hero-card.off p { color: var(--ash); }
 .kind.off { opacity: .4; cursor: not-allowed; }
 .path { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .pstep { border: 1px solid var(--ember); background: rgb(253 109 20 / .12); color: var(--bone); border-radius: 9px; padding: 7px 11px; font-size: 13px; }
@@ -386,7 +396,9 @@ img.glow { animation: doorglow 2.4s ease-in-out infinite; }
 .step.skins textarea { width: 100%; resize: vertical; background: var(--raise); color: var(--bone); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font: inherit; }
 
 /* First-start notice for usage counts: a card in the corner, so the studio's layout never moves. */
-.usage-notice { position: fixed; right: 16px; bottom: 16px; z-index: 50; max-width: min(420px, calc(100vw - 32px));
-  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; box-shadow: 0 8px 28px rgba(0,0,0,.45); }
-.usage-notice p { margin: 0 0 8px; }
-.usage-notice .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.usage-notice { position: fixed; right: 16px; bottom: 16px; z-index: 50; max-width: min(300px, calc(100vw - 32px));
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; box-shadow: 0 6px 20px rgba(0,0,0,.4);
+  font-size: 12px; line-height: 1.4; }
+.usage-notice p { margin: 0; }
+.usage-notice .row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.usage-notice .row > * { font-size: 12px; padding: 3px 9px; }

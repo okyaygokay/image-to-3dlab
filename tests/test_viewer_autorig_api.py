@@ -46,7 +46,10 @@ def test_the_describe_endpoint_takes_a_prompt_and_starts_the_colab_job(
     def post(body: dict) -> tuple[int, dict]:
         request = urllib.request.Request(
             "http://127.0.0.1:1/api/animate/describe",
-            data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json",
+                     # the studio page's own request, as request_utils.check_request wants
+                     "X-AssetFurnace-Request": "studio"})
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), api.Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:

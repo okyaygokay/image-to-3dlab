@@ -37,6 +37,7 @@ FINISH_KEYS = ("faces", "keep_mesh", "skip_photo", "skip_edge_fade", "skip_nudge
                "high_detail", "hero")
 # Only Pixal3D builds from a front and a back picture.
 FRONT_BACK_ENGINES = {"pixal3d"}
+PICTURE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 # Steps that run headless Blender; a plan with one is checked for Blender before anything runs.
 NEEDS_BLENDER = {"finished", "split"}
 NOISE = re.compile(r"\[(VERBOSE|DEBUG)\]|ggml_|kernel_|compile_pipeline|th_max|^\s*[|\-=]*\s*$|^\s*0x[0-9a-f]+", re.IGNORECASE)
@@ -183,6 +184,11 @@ class ChainRunner:
 
     # ------------------------------------------------------------------ the run
     def run(self, chain: Chain) -> None:
+        if self._picture_upload(chain) and not chain.made.get("picture"):
+            try:
+                self._kept_upload(chain)   # kept from the start, so the Library shows it even on a front-only run
+            except OSError:
+                pass                       # the run still has the bytes; only the Library loses the picture
         for step in chain.steps:
             if chain.cancel_requested:
                 chain.status = "cancelled"
@@ -276,12 +282,17 @@ class ChainRunner:
             return chain.upload
         raise ValueError("this step needs a picture, and there is none yet")
 
+    @staticmethod
+    def _picture_upload(chain: Chain) -> bool:
+        return bool(chain.upload) and Path(chain.upload[0]).suffix.lower() in PICTURE_SUFFIXES
+
     def _kept_upload(self, chain: Chain) -> str:
         """An uploaded picture, saved under output/images/uploads/ so other jobs can read it by
         path (the back job does). Recorded as the chain's picture from then on."""
         name, data = chain.upload
         stem = re.sub(r"[^a-z0-9]+", "-", Path(name).stem.lower()).strip("-") or "upload"
-        relative = f"images/uploads/{chain.id[:8]}__{stem}{Path(name).suffix.lower() or '.png'}"
+        # name first, so the Library calls it "my orc" rather than the run id
+        relative = f"images/uploads/{stem}__{chain.id[:8]}{Path(name).suffix.lower() or '.png'}"
         path = self.output / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
@@ -382,7 +393,7 @@ def _percent(event: dict[str, Any]) -> float | None:
 def append_history(output: Path, record: dict[str, Any]) -> None:
     try:
         output.mkdir(parents=True, exist_ok=True)
-        with (output / HISTORY_NAME).open("a") as handle:
+        with (output / HISTORY_NAME).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
     except OSError:
         pass  # a history that cannot be written must never stop a run
@@ -391,7 +402,7 @@ def append_history(output: Path, record: dict[str, Any]) -> None:
 def read_history(output: Path, limit: int = 200) -> list[dict[str, Any]]:
     """Newest first. A damaged line is skipped, not fatal."""
     try:
-        lines = (output / HISTORY_NAME).read_text().splitlines()
+        lines = (output / HISTORY_NAME).read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
     records = []
@@ -405,14 +416,17 @@ def read_history(output: Path, limit: int = 200) -> list[dict[str, Any]]:
     return records
 
 
-def local_request(base: str) -> Request:
-    """Calls this same server, as the browser would. Long-running jobs answer their start at once."""
+def local_request(base: str, token: str | None = None) -> Request:
+    """Calls this same server, as the browser would, with the studio's request header (the
+    server refuses writes without one) and its key when it has one (studio_auth). Long-running
+    jobs answer their start at once."""
     import urllib.error
     import urllib.request
 
     def request(method: str, path: str, body: bytes | None, content_type: str | None,
                 headers: dict[str, str] | None = None):
-        req = urllib.request.Request(base + path, data=body, method=method, headers=headers or {})
+        sent = {"X-AssetFurnace-Request": "plan", **({"Authorization": f"Bearer {token}"} if token else {})}
+        req = urllib.request.Request(base + path, data=body, method=method, headers={**sent, **(headers or {})})
         if content_type:
             req.add_header("Content-Type", content_type)
         try:

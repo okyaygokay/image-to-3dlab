@@ -305,6 +305,25 @@ def photo_note(job: FinishJob, settings: dict[str, Any]) -> str | None:
             "models generated in this lab, which keep their camera beside the .glb.")
 
 
+# What a run prints when Pixel Match paints: the photo stage's own count, or the Hero route's stage line.
+PHOTO_RAN = re.compile(r"^\[photo\] \d+ view\(s\)|^\[hero\s+\d+s\] .*Pixel Match")
+PIXEL_MATCH_NAME = "pixel-match.json"   # beside the result: the Library reads it after the job is gone
+
+
+def pixel_match_result(ran: bool, views_dir: Path, settings: dict[str, Any]) -> str:
+    """Whether Pixel Match ran, in the words the Finish step shows: 'on (front + back)',
+    'on (front)', 'off' or 'skipped: <why>'. Without it a skipped run and one where Pixel Match
+    changed little look the same."""
+    if ran:
+        frames = (_read_json(views_dir / "transforms.json") or {}).get("frames") or []
+        return "on (front + back)" if len(frames) >= 2 else "on (front)"
+    if settings.get("skip_photo", False):
+        return "off"
+    if not (views_dir / "transforms.json").is_file():
+        return "skipped: no saved camera (only Pixal3D models made here have one)"
+    return "skipped"
+
+
 def find_source_views(asset: bytes, root: Path = GENERATED_ROOT) -> Path | None:
     """The saved camera + view directory of the Pixal3D run that produced `asset`.
 
@@ -616,7 +635,7 @@ class FinishJobManager:
                 # Written up front, not with the record at the end: a run that dies
                 # halfway is exactly the one worth resuming, and resuming it means
                 # knowing the settings the surviving intermediates were made with.
-                job.settings_path.write_text(json.dumps(job.settings, indent=2))
+                job.settings_path.write_text(json.dumps(job.settings, indent=2), encoding="utf-8")
             except Exception:
                 shutil.rmtree(directory, ignore_errors=True)
                 raise
@@ -639,11 +658,11 @@ class FinishJobManager:
             job = FinishJob(uuid.uuid4().hex, directory)
             if not job.settings_path.is_file():
                 raise RuntimeError(f"{name} predates resume support and has no settings.json")
-            for required in needed_inputs(job, json.loads(job.settings_path.read_text())):
+            for required in needed_inputs(job, json.loads(job.settings_path.read_text(encoding="utf-8"))):
                 if not required.is_file():
                     raise RuntimeError(f"{name} is missing {required.name}")
             job.settings = fit_to_machine(
-                normalise_settings(json.loads(job.settings_path.read_text())))
+                normalise_settings(json.loads(job.settings_path.read_text(encoding="utf-8"))))
             job.resume = True
             self.jobs[job.id] = job
             self.active = job.id
@@ -691,17 +710,19 @@ def run_job(job: FinishJob, manager: FinishJobManager = FINISH_JOBS) -> None:  #
         job.process = subprocess.Popen(
             hero_command(job, job.settings) if hero else build_command(job, job.settings, resume=job.resume),
             cwd=str(REPO),
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+            env=processes.child_env(),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, **processes.TEXT_PIPE,
             **processes.group_popen_kwargs(),
         )
-        job.directory.joinpath("pid").write_text(processes.pid_record(job.process.pid))
+        job.directory.joinpath("pid").write_text(processes.pid_record(job.process.pid), encoding="utf-8")
         assert job.process.stdout is not None
+        photo_ran = False
         for raw in job.process.stdout:
             line = raw.rstrip("\n")
             if not line:
                 continue
             job.append_log(line)
+            photo_ran = photo_ran or bool(PHOTO_RAN.search(line))
             event = progress.feed(line)
             if event:
                 job.emit(event)
@@ -721,11 +742,19 @@ def run_job(job: FinishJob, manager: FinishJobManager = FINISH_JOBS) -> None:  #
                 provenance = job.result_glb.with_suffix(".provenance.json")
                 if provenance.is_file():
                     shutil.copy(provenance, job.record_path)   # what record_url serves
-            job.status = "done"
-            usage_api.count_done("finish")   # nothing if the person turned sharing off
+            pixel_match = pixel_match_result(photo_ran, job.views_dir, job.settings)
+            try:
+                (job.directory / PIXEL_MATCH_NAME).write_text(json.dumps({"pixel_match": pixel_match}),
+                                                             encoding="utf-8")
+            except OSError:
+                pass   # only the Library's line is lost; the result itself is fine
+            # The done event (with the file's path) goes out BEFORE the status flips: a plan polls
+            # the status and reads the last event, so the other order can lose the result.
             job.emit({
                 "phase": "done", "overall_pct": 100,
-                "message": f"Finished at {job.result_glb.stat().st_size / 1048576:.1f} MB",
+                "message": (f"Finished at {job.result_glb.stat().st_size / 1048576:.1f} MB · "
+                            f"Pixel Match: {pixel_match}"),
+                "pixel_match": pixel_match,
                 "result_url": f"/api/finish/{job.id}/result.glb",
                 "record_url": f"/api/finish/{job.id}/record.json",
                 "size_bytes": job.result_glb.stat().st_size,
@@ -735,6 +764,8 @@ def run_job(job: FinishJob, manager: FinishJobManager = FINISH_JOBS) -> None:  #
                 "pixal3d": (job.views_dir / "transforms.json").is_file(),
                 "note": photo_note(job, job.settings),
             })
+            job.status = "done"
+            usage_api.count_done("finish")   # nothing if the person turned sharing off
         else:
             job.status = "error"
             job.emit({"phase": "error", "message": "worker exited without writing a GLB"})
@@ -861,7 +892,7 @@ def served_url(path: Path) -> str | None:
 
 def _read_json(path: Path) -> dict[str, Any] | None:
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
 

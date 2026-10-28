@@ -293,7 +293,7 @@ def test_a_sheet_is_put_away_so_the_viewer_under_it_can_be_seen():
 def test_everything_the_studio_shows_in_the_viewer_puts_a_sheet_away_first():
     """Both routes into the viewer -- picking a Library asset, and watching a run -- have to
     clear the sheet. Opening a GLB already did; the other two did not."""
-    app = (REPO / "viewer" / "studio" / "app.js").read_text()
+    app = (REPO / "viewer" / "studio" / "app.js").read_text(encoding="utf-8")
 
     def body(name: str) -> str:
         start = app.index(f"function {name}(")
@@ -307,7 +307,7 @@ def test_everything_the_studio_shows_in_the_viewer_puts_a_sheet_away_first():
 
 @needs_node
 def test_the_how_to_page_covers_every_button_in_the_top_bar():
-    html = (REPO / "viewer" / "studio.html").read_text()
+    html = (REPO / "viewer" / "studio.html").read_text(encoding="utf-8")
     import re
     bar = html.split('<header class="bar">')[1].split("</header>")[0]
     labels = [re.sub(r"<[^>]+>", "", m).strip() for m in re.findall(r'class="ghost[^"]*"[^>]*>([^<]+)<', bar)]
@@ -320,17 +320,17 @@ def test_the_how_to_page_covers_every_button_in_the_top_bar():
 def test_the_classic_viewer_is_gone_and_old_links_land_in_the_studio():
     viewer = REPO / "viewer"
     assert not (viewer / "app.js").exists() and not (viewer / "modes").exists()
-    assert 'url=./studio.html' in (viewer / "index.html").read_text()
-    studio = (viewer / "studio.html").read_text()
+    assert 'url=./studio.html' in (viewer / "index.html").read_text(encoding="utf-8")
+    studio = (viewer / "studio.html").read_text(encoding="utf-8")
     assert "index.html" not in studio and "Classic" not in studio
     assert 'href="./setup.html"' in studio
 
 
 def test_setup_has_a_way_back_to_the_studio_and_every_element_its_script_needs():
     import re
-    page = (REPO / "viewer" / "setup.html").read_text()
+    page = (REPO / "viewer" / "setup.html").read_text(encoding="utf-8")
     assert page.count('href="./studio.html"') >= 2  # the logo, the Back button, the Done link
-    script = (REPO / "viewer" / "studio" / "setup.js").read_text()
+    script = (REPO / "viewer" / "studio" / "setup.js").read_text(encoding="utf-8")
     ids = set(re.findall(r"s\('([a-z-]+)'\)", script)) - {"huggingface"}  # that one is a card it builds
     missing = [i for i in ids if f'id="{i}"' not in page]
     assert ids and not missing, missing
@@ -340,7 +340,7 @@ def test_a_machine_with_no_route_is_not_told_that_amd_is_coming():
     """AMD ships: five routes in the catalogue list it and the README says so. The
     no-route banner used to promise it anyway -- on the one screen whose whole job is to
     tell a visitor what this machine can actually run."""
-    script = (REPO / "viewer" / "studio" / "setup.js").read_text()
+    script = (REPO / "viewer" / "studio" / "setup.js").read_text(encoding="utf-8")
     assert "nothing to install yet" in script
     banner = script.split("nothing to install yet")[0].rsplit("return `", 1)[-1]
     for promise in ("coming", "not yet", "later", "soon"):
@@ -357,7 +357,7 @@ def test_the_banner_it_prints_names_amd_as_a_supported_machine():
     assert any("AMD" in entry for entry in supported), supported
 
 
-RECIPES = json.loads((REPO / "image_to_3dlab" / "prompt_recipes.json").read_text())
+RECIPES = json.loads((REPO / "image_to_3dlab" / "prompt_recipes.json").read_text(encoding="utf-8"))
 
 
 def test_every_goal_has_tips_and_the_3d_goals_add_wording():
@@ -642,11 +642,11 @@ def test_the_face_count_reads_the_viewport_stats():
 
 def test_the_viewer_offers_clay_and_normal_views():
     """The buttons exist and are wired to the tested swap; the how-to page names them."""
-    viewer = (REPO / "viewer" / "studio" / "viewer.js").read_text()
+    viewer = (REPO / "viewer" / "studio" / "viewer.js").read_text(encoding="utf-8")
     for act in ("clay", "normal"):
         assert f'data-act="{act}"' in viewer
     assert "applyLook(meshesOf(view.materials)" in viewer
-    guide = (REPO / "viewer" / "studio" / "pages.js").read_text()
+    guide = (REPO / "viewer" / "studio" / "pages.js").read_text(encoding="utf-8")
     assert "clay" in guide and "normals" in guide and "face count" in guide
 
 
@@ -710,7 +710,7 @@ def test_each_activity_entry_is_one_line():
 
 @needs_node
 def test_the_picture_guide_renders_from_the_real_doc():
-    doc = (REPO / "docs" / "prompt-guide.md").read_text()
+    doc = (REPO / "docs" / "prompt-guide.md").read_text(encoding="utf-8")
     out = _run("guide.js", f"""
       const html = m.renderGuide({json.dumps(doc)});
       console.log(JSON.stringify({{ html, links: [
@@ -727,7 +727,7 @@ def test_the_picture_guide_renders_from_the_real_doc():
 
 
 def test_the_tips_link_to_the_guide_the_studio_opens():
-    recipes = json.loads((REPO / "image_to_3dlab" / "prompt_recipes.json").read_text())
+    recipes = json.loads((REPO / "image_to_3dlab" / "prompt_recipes.json").read_text(encoding="utf-8"))
     assert any("prompt-guide.md" in tip for tip in recipes["goals"]["character"]["tips"])
     assert (REPO / "docs" / "prompt-guide.md").is_file()
 
@@ -1005,18 +1005,51 @@ def test_a_plan_s_files_and_settings_travel_to_the_server():
 
 
 @needs_node
-def test_hero_card_shows_for_pixal3d_characters_and_models_only():
+def test_hero_card_shows_for_characters_and_models_and_says_why_when_it_cannot_run():
     out = _run("steps.js", """
       const base = { picture: 'images/e/e.png', model: 'e__pixal3d__1/e.glb', finished: null };
+      const off = (a) => { const html = m.heroCard(a); return html.includes('hero-card off') && !html.includes('data-run') ? html : false; };
       console.log(JSON.stringify({
         model: m.heroCard({ ...base, kind: 'model' }).includes('Finish as a Hero'),
         finishedChar: m.heroCard({ ...base, kind: 'character', finished: 'finish/x/e_20k.glb' }).includes('Make a Hero version'),
         alreadyHero: m.heroCard({ ...base, kind: 'character', finished: 'finish/x/e_hero.glb' }),
         prop: m.heroCard({ ...base, kind: 'prop' }), sheet: m.heroCard({ ...base, kind: 'prop set' }),
-        trellis: m.heroCard({ ...base, kind: 'model', model: 'e__trellis__1/e.glb' }),
-        noPicture: m.heroCard({ ...base, kind: 'model', picture: null }) }));""")
-    assert out == {"model": True, "finishedChar": True, "alreadyHero": "", "prop": "", "sheet": "",
-                   "trellis": "", "noPicture": ""}
+        notBuilt: m.heroCard({ ...base, kind: 'model', model: null }),
+        trellis: off({ ...base, kind: 'model', model: 'e__trellis__1/e.glb' }),
+        noPicture: off({ ...base, kind: 'model', picture: null }) }));""")
+    assert {k: v for k, v in out.items() if k not in ("trellis", "noPicture")} == {
+        "model": True, "finishedChar": True, "alreadyHero": "", "prop": "", "sheet": "", "notBuilt": ""}
+    assert "Pixal3D" in out["trellis"]          # greyed out with the reason, never just gone
+    assert "picture" in out["noPicture"]
+
+
+@needs_node
+def test_finish_detail_offers_hero_only_where_it_can_run_and_its_hint_follows_the_choice():
+    out = _run("steps.js", """
+      const ctx = { blenderReady: true, engines: [], presets: [] };
+      const a = { kind: 'character', picture: 'i/k.png', model: 'm/k__pixal3d__1/k.glb', finished: null, clips: [] };
+      const option = (html) => html.match(/<option value="hero"[^>]*>/)[0];
+      const html = m.stepBody('finished', a, ctx);
+      console.log(JSON.stringify({
+        ok: option(html), trellis: option(m.stepBody('finished', { ...a, model: 'm/k__trellis__1/k.glb' }, ctx)),
+        // the Detail menu shows and hides its own hint, never the Hero card's button above it
+        heroButtons: (html.match(/data-hero[ >]/g) || []).length, hints: (html.match(/data-hero-hint/g) || []).length }));""")
+    assert "disabled" not in out["ok"] and "disabled" in out["trellis"]
+    assert out["heroButtons"] == 1 and out["hints"] == 1
+
+
+@needs_node
+def test_fix_a_spot_works_on_the_finished_model_even_once_rigged():
+    out = _run("library.js", f"""
+      const k = {json.dumps(KNIGHT)}, unrigged = {{ ...k, rigged: null, clips: [] }}, raw = {{ ...k, finished: null, rigged: null }};
+      console.log(JSON.stringify({{
+        riggedLatest: m.canFixShown(k), riggedViaView: m.canFixShown(k, {{ step: 'finished' }}),
+        rawStep: m.canFixShown(k, {{ step: 'model' }}), pictures: m.canFixShown(unrigged, {{ pictures: true }}),
+        unrigged: m.canFixShown(unrigged), notFinished: m.canFixShown(raw, {{ step: 'finished' }}),
+        noteRigged: m.fixBlockedNote(k), noteRaw: m.fixBlockedNote(raw) }}));""")
+    assert out["riggedViaView"] and out["unrigged"]
+    assert not any(out[k] for k in ("riggedLatest", "rawStep", "pictures", "notFinished"))
+    assert "View on the Finished step" in out["noteRigged"] and "Finish this one first" in out["noteRaw"]
 
 
 @needs_node
@@ -1044,7 +1077,7 @@ def test_the_full_guide_is_one_address_the_studio_shares():
 
 def test_how_to_use_tips_and_about_all_link_the_full_guide():
     studio = REPO / "viewer" / "studio"
-    pages, create = (studio / "pages.js").read_text(), (studio / "create.js").read_text()
+    pages, create = (studio / "pages.js").read_text(encoding="utf-8"), (studio / "create.js").read_text(encoding="utf-8")
     guide_sheet = pages.split("export function openGuide")[1].split("\n}\n")[0]
     about = pages.split("<h3>Find us</h3>")[1].split("</div>")[0]
     tips = create.split('class="tipsbox"')[1].split("</div>")[0]

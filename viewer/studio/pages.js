@@ -53,6 +53,44 @@ function sheet(stage, inner) {
   return el;
 }
 
+// News: notices from us (notices_api.py), behind the header's News button. Never pops up; opening the
+// list marks what was shown as read.
+export function newsCount(answer) {
+  return Math.max(0, Number(answer?.unread) || 0);
+}
+
+export async function refreshNews(button) {
+  let answer;
+  try { answer = await (await fetch('/api/notices')).json(); } catch { return null; }
+  const count = newsCount(answer), badge = button.querySelector('.news-count');
+  badge.textContent = String(count);
+  badge.hidden = count === 0;
+  button.classList.toggle('has-news', count > 0);
+  button.hidden = answer?.enabled === false;
+  return answer;
+}
+
+export async function openNews(stage, button) {
+  const el = sheet(stage, `<div class="sheet-card">
+    <div class="sheet-top"><h2>News</h2><button type="button" class="ghost" data-close>Close</button></div>
+    <p class="meta">From the people who make AssetFurnace: new versions, Cloud, known problems and fixes. Checked once a day; nothing about you is sent.</p>
+    <div class="notices" aria-live="polite"><p class="meta">Loading…</p></div></div>`);
+  const box = el.querySelector('.notices');
+  let answer;
+  try { answer = await (await fetch('/api/notices')).json(); } catch { box.innerHTML = '<p class="meta">Could not load the news. Try again later.</p>'; return; }
+  const list = answer?.notices || [];
+  box.innerHTML = list.length ? list.map((n) => `<div class="notice${n.read ? '' : ' unread'}">
+      <h3>${escape(n.title)}${n.read ? '' : '<span class="new">NEW</span>'}</h3>
+      ${n.text ? `<p>${escape(n.text)}</p>` : ''}
+      ${n.url ? `<a href="${escape(n.url)}" target="_blank" rel="noopener">${escape(n.link_text || 'Read more')} →</a>` : ''}
+    </div>`).join('') : '<p class="meta">Nothing new. You are all caught up.</p>';
+  const unread = list.filter((n) => !n.read).map((n) => n.id);
+  if (unread.length) {
+    await fetch('/api/notices/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: unread }) }).catch(() => {});
+    if (button) refreshNews(button);
+  }
+}
+
 export async function openActivity(stage) {
   const el = sheet(stage, `<div class="sheet-card">
     <div class="sheet-top"><h2>Activity</h2><button type="button" class="ghost" data-close>Close</button></div>
@@ -120,7 +158,7 @@ export async function openAbout(stage) {
     <p>This is a young new project and will only survive when people like you use it, critique it, share feedback and most
       of all spread the word. So if you use this and like it, share it with a friend. If you have feedback, write up an issue
       on <a href="https://github.com/Bingeljell/image-to-3dlab/issues" target="_blank" rel="noopener">GitHub</a>, we’re on
-      <a href="https://discord.gg/3D4bcEhGx" target="_blank" rel="noopener">Discord</a>, or you can tag me in a post on
+      <a href="https://discord.gg/EuY9cQTRUt" target="_blank" rel="noopener">Discord</a>, or you can tag me in a post on
       <a href="https://x.com/bingeljell" target="_blank" rel="noopener">X</a>. Most of all, we’d love contributions.</p>
     <p>The goal is to enable you to make game-ready 3D characters and props on your own machine: from an idea, a picture or a model, to a rigged,
       moving character you can drop into Godot, Unity, Unreal or Blender. Your pictures, prompts and models never leave this computer.</p>
@@ -159,7 +197,7 @@ export async function openAbout(stage) {
       <a class="ghost" href="https://assetfurnace.com" target="_blank" rel="noopener">assetfurnace.com</a>
       <a class="ghost" href="${FULL_GUIDE}" target="_blank" rel="noopener">Guide</a>
       <a class="ghost" href="https://github.com/Bingeljell/image-to-3dlab" target="_blank" rel="noopener">GitHub</a>
-      <a class="ghost" href="https://discord.gg/3D4bcEhGx" target="_blank" rel="noopener">Discord</a>
+      <a class="ghost" href="https://discord.gg/EuY9cQTRUt" target="_blank" rel="noopener">Discord</a>
       <a class="ghost" href="https://github.com/Bingeljell/image-to-3dlab/issues" target="_blank" rel="noopener">Report a problem</a>
     </div>
     <p class="meta signoff" style="text-align:right;opacity:.55;margin-top:1.5em">✝︎ b'tzelem Elohim</p></div>`);
@@ -199,12 +237,10 @@ export async function usageNotice(openAboutPage) {
   const card = document.createElement('aside');
   card.className = 'usage-notice';
   card.setAttribute('role', 'status');
-  card.innerHTML = `<p><b>Anonymous usage counts</b></p>
-    <p>Once a day AssetFurnace tells us it is in use, and how many pictures, models and other jobs were made. Never your prompts, pictures or models.
-      We need a sense of how many people use the app, for what and how. It helps us pick which features and fixes come first, and lets us brag a little about the community's love.</p>
+  card.innerHTML = `<p><b>Anonymous usage counts</b> once a day: how many pictures and models were made. Never your prompts, pictures or models.</p>
     <div class="row"><button class="primary" data-ok>Got it</button>
-      <button class="ghost" data-about>Turn off in About</button>
-      <a class="ghost" href="${escape(state.policy)}" target="_blank" rel="noopener">What we collect</a></div>`;
+      <button class="ghost" data-about>Turn off</button>
+      <a class="ghost" href="${escape(state.policy)}" target="_blank" rel="noopener">Details</a></div>`;
   const done = () => {
     card.remove();
     fetch('/api/usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ noticed: true }) }).catch(() => {});
@@ -227,6 +263,7 @@ export const GUIDE = [
   ['Hero face', 'For characters whose face matters. In the Finish step, set Detail to Hero face. The body is finished as usual, then the head is built again from a close, sharper crop of your picture and joined on, so faces get real eyelids instead of goggle eyes. It takes longer than a normal Finish, and needs a model made from a picture. Long hair below the shoulders keeps the body\'s plainer detail. Have a look at the eyes: if a pupil is a dark hole, Fix a spot\'s Fill hole closes it.'],
   ['Fix a spot', 'The brush button in the 3D view, on a finished model. Click to mark spots (size the ring with the slider or [ ]), press Patch to preview, flip Before / After, then Keep (a new version) or Discard. Fill hole cuts out a pocket or dent and patches it smooth: dark pupils, goggle eyes, pits in a beard. Smooth irons out bumps and ridges without cutting (set its strength). Repaint changes paint only, from your picture: scuffs and smears.'],
   ['Open GLB', 'Look at any GLB from your computer, or drop one anywhere on the page. View only: nothing is copied into your Library.'],
+  ['News', 'Short notes from us: a new version, AssetFurnace Cloud, a known problem and its fix. A number shows when there is something new; it never pops up.'],
   ['Activity', 'Everything that has run, finished, stopped or failed, with logs when something breaks.'],
   ['Report a bug', 'Tell us what broke. The studio adds the version, your machine and the error; you read it all, then send it through our site, GitHub or Discord.'],
   ['Setup', 'Install engines and see disk use. Nothing downloads until you say yes, and each download says how big it is first.'],
@@ -257,7 +294,7 @@ export async function openReport(stage, { chain = '', step = '' } = {}) {
       <button type="button" class="primary" data-send="site">Send via assetfurnace.com</button>
       <p class="meta">Opens our site. You sign in with your email first, so we can reply.</p>
       <div class="row"><button type="button" class="ghost" data-send="github">Open on GitHub</button><button type="button" class="ghost" data-send="copy">Copy report</button></div>
-      <p class="meta" data-note>GitHub needs an account. Or copy the report and paste it in <a href="https://discord.gg/3D4bcEhGx" target="_blank" rel="noopener">#bugs on our Discord</a>.</p>
+      <p class="meta" data-note>GitHub needs an account. Or copy the report and paste it in <a href="https://discord.gg/EuY9cQTRUt" target="_blank" rel="noopener">#bugs on our Discord</a>.</p>
     </div></div>`);
   const $ = (sel) => el.querySelector(sel);
   const load = async () => {

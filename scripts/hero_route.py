@@ -294,13 +294,14 @@ def replay_command(colab: bool, dump: Path, output: Path, faces: int, atlas: int
 
 
 def finish(run: Run, model: Path, picture: Path, views: Path | None, out: Path, faces: int,
-           dump: Path | None) -> None:
+           dump: Path | None, classic: bool = False) -> None:
     """Finish one model: retopo to FACES, and Pixel Match when its run's cameras exist.
 
     `views` is None for a body from another engine (no .svviews behind it): the run then
     has no photo stage and the model keeps its own texture. `dump` is None when the body
     is not a Pixal3D model: the clean-up is the classic route. A Pixal3D body whose dump
-    was lost still keeps its mesh (--keep-mesh), as before.
+    was lost still keeps its mesh (--keep-mesh), as before. `classic` forces the classic
+    clean-up even on a Pixal3D model — the head's fallback when post-replay fails.
     """
     command = [PYTHON, "-u", FINISH, model, picture, out, "--steps-dir", out.with_suffix(".steps"),
                "--faces", str(faces), *FINISH_FLAGS]
@@ -308,7 +309,7 @@ def finish(run: Run, model: Path, picture: Path, views: Path | None, out: Path, 
         command += ["--views", views]
     if dump:
         command += ["--native-dump", dump]
-    elif views is not None:
+    elif not classic and views is not None:
         command += ["--keep-mesh"]
     run.run(command)
     record = json.loads(out.with_suffix(".retopo-repaint.json").read_text())
@@ -318,15 +319,37 @@ def finish(run: Run, model: Path, picture: Path, views: Path | None, out: Path, 
                  "objected; see run.log): hair and thin parts can shatter")
 
 
-def head_cleanup(run: Run, raw: Path, out: Path, faces: int, colab: bool = False) -> None:
-    """Pixal3D's own clean-up at FACES. Its mirror check is a coin-flip on a front-facing,
-    near-symmetric head (0.2% vs 0.3% on the elf) and would drop to the classic route, which
-    shatters hair; a head crop is always front-facing, so convert directly and say so."""
+def head_cleanup(run: Run, raw: Path, out: Path, faces: int, colab: bool = False) -> bool:
+    """Pixal3D's own clean-up at FACES; False when post-replay fails. Its mirror check is a
+    coin-flip on a front-facing, near-symmetric head (0.2% vs 0.3% on the elf) and would drop
+    to the classic route, which shatters hair; a head crop is always front-facing, so convert
+    directly and say so."""
     from image_to_3dlab import pixal3d_native as native
 
     replay = out.with_name(out.stem + ".replay.glb")
-    run.run(replay_command(colab, raw.with_suffix(native.DUMP_SUFFIX), replay, faces, 2048))
+    if not run.run(replay_command(colab, raw.with_suffix(native.DUMP_SUFFIX), replay, faces, 2048),
+                   required=False):
+        return False
     out.write_bytes(native.convert_replay_glb(replay.read_bytes()))
+    return True
+
+
+def finish_head(run: Run, raw: Path, picture: Path, clean: Path, head: Path, faces: int,
+                colab: bool = False) -> None:
+    """The head, cleaned up and Pixel Matched into HEAD. When Pixal3D's own clean-up fails
+    (seen on Windows), the classic Finish does both in one go instead of failing the run;
+    CLEAN then holds that finished head, so a rerun skips the step."""
+    views = raw.with_suffix(".svviews")
+    if run.step(f"head: clean-up {faces}", clean):
+        if head_cleanup(run, raw, clean, faces, colab):
+            run.flag("head clean-up skips Finish's mirror check (front-facing crop); glance at the check sheet")
+        else:
+            run.flag("Pixal3D's own clean-up failed on the head (see run.log); it took the classic "
+                     "clean-up instead: hair and thin parts can shatter")
+            finish(run, raw, picture, views, head, faces, None, classic=True)
+            shutil.copy(head, clean)
+    if run.step("head: Pixel Match", head):
+        finish(run, clean, picture, views, head, faces, None)
 
 
 def stage_body_inputs(body: Path, views: Path | None, dump: Path | None, record: Path | None,
@@ -491,13 +514,8 @@ def main() -> int:
     head_raw = out / "head_raw.glb"
     if run.step("head: Pixal3D on the crop", head_raw):
         run.run(pixal_command(colab, head_picture, head_raw, "--seed", str(args.seed)))
-    head_clean = out / "head_clean.glb"
-    if run.step(f"head: clean-up {args.head_faces}", head_clean):
-        head_cleanup(run, head_raw, head_clean, args.head_faces, colab)
-        run.flag("head clean-up skips Finish's mirror check (front-facing crop); glance at the check sheet")
     head = out / "head.glb"
-    if run.step("head: Pixel Match", head):
-        finish(run, head_clean, head_picture, head_raw.with_suffix(".svviews"), head, args.head_faces, None)
+    finish_head(run, head_raw, head_picture, out / "head_clean.glb", head, args.head_faces, colab)
 
     head_baked = out / "head_baked.glb"
     if run.step("head: bake normal map from the raw head", head_baked):

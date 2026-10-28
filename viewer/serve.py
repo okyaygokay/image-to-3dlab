@@ -5,8 +5,12 @@
     python viewer/serve.py --auto               # what ./lab runs: picks how to listen, opens the browser
     python viewer/serve.py --host 100.x.y.z      # explicit Tailscale/LAN interface
 
-Bound to 127.0.0.1 by default. An explicit --host exposes the whole repository, including
-`output/`, on that interface; use a private interface protected by appropriate ACLs.
+Bound to 127.0.0.1 by default, with no key. Listening anywhere else (--host, a RunPod pod) it
+makes a random key and prints a link carrying it (studio_auth.py): only that link gets in.
+Set I3D_STUDIO_TOKEN to keep the same key across restarts. Dotfiles are never served.
+Behind a proxy that keeps 127.0.0.1 (tailscale serve, cloudflared, ngrok, VS Code port
+forwarding), list the proxy's host names in I3D_ALLOWED_HOSTS, e.g.
+I3D_ALLOWED_HOSTS=box.tail1234.ts.net (see request_utils.py).
 
 The viewer exists because judging a mesh by eye is the acceptance test in this repo, and
 every such judgement previously required opening Blender. It is also driveable by browser
@@ -29,6 +33,7 @@ from typing import NamedTuple
 # and when loaded by the test suite via importlib (script dir not on sys.path).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import studio_auth
 import usage_api
 from generate_api import (
     OUTPUT_ROOT,
@@ -36,6 +41,8 @@ from generate_api import (
     _reconcile_orphaned_jobs,
     _terminate_active_job,
 )
+
+from image_to_3dlab import processes
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -60,7 +67,7 @@ class LaunchPlan(NamedTuple):
     message: str
 
 
-def launch_plan(env: Mapping[str, str], port: int = 8777) -> LaunchPlan:
+def launch_plan(env: Mapping[str, str], port: int = 8777, token: str | None = None) -> LaunchPlan:
     """How `./lab` (serve.py --auto) should listen, for a new user who just ran the installer.
 
     On their own machine: privately, and open the browser. On a RunPod pod: on all
@@ -71,9 +78,11 @@ def launch_plan(env: Mapping[str, str], port: int = 8777) -> LaunchPlan:
     local = f"http://127.0.0.1:{port}/viewer/studio.html"
     pod = env.get("RUNPOD_POD_ID")
     if pod:
+        link = f"https://{pod}-{port}.proxy.runpod.net/viewer/studio.html"
         return LaunchPlan("0.0.0.0", False, (
-            f"Open https://{pod}-{port}.proxy.runpod.net/viewer/studio.html\n"
-            f"(the pod needs HTTP port {port} exposed; add it in the pod's settings if not)"))
+            f"Open {studio_auth.link_with_token(link, token) if token else link}\n"
+            f"(the pod needs HTTP port {port} exposed; add it in the pod's settings if not)\n"
+            f"Keep this link private: it is the key to this studio."))
     if env.get("SSH_CONNECTION") or env.get("SSH_CLIENT"):
         return LaunchPlan("127.0.0.1", False, (
             f"This is a remote machine. On your own computer, run\n"
@@ -93,9 +102,24 @@ def main() -> int:
     plan = launch_plan(os.environ, args.port) if args.auto else None
     if plan is not None:
         args.host = plan.host
+    # reachable from a network (or a tunnel): only the printed link (it carries a key) gets in
+    try:
+        token = studio_auth.make_token(os.environ) if studio_auth.needs_token(args.host) else None
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    Handler.studio_token = token
+    if token:
+        studio_auth.save_token(token)       # tools on this machine (MCP, plan runner) read it here
+    else:
+        studio_auth.forget_token()          # a key left from an earlier, keyed run
+    if plan is not None and token:
+        plan = launch_plan(os.environ, args.port, token)
 
     url = f"http://{args.host}:{args.port}/viewer/studio.html"
-    print(url, flush=True)
+    print(studio_auth.link_with_token(url, token) if token else url, flush=True)
+    if token and os.environ.get("I3D_ALLOWED_HOSTS"):
+        print(f"Through your tunnel, open its address with ?token={token} at the end. Keep it private.", flush=True)
 
     # A prior server life may have died mid-generation (crash, closed terminal) without
     # ever recording how that job ended, and its detached child can still be running with
@@ -111,6 +135,7 @@ def main() -> int:
     # process outright, mid-job, with no chance to clean up), so both signals get one here.
     def _handle_shutdown_signal(signum, frame):
         _terminate_active_job()
+        studio_auth.forget_token()
         raise SystemExit(0)
 
     signal.signal(signal.SIGTERM, _handle_shutdown_signal)
@@ -123,6 +148,10 @@ def main() -> int:
             print(plan.message, flush=True)
             if plan.open_browser and not args.no_browser:
                 webbrowser.open(f"http://127.0.0.1:{args.port}/viewer/studio.html")
+        # Windows: sd-cli and the other workers die with this server, also when it is killed
+        # from Task Manager (TerminateProcess runs none of the handlers above). Only after the
+        # browser opens: a browser this starts would be in the job and close with the studio.
+        processes.kill_children_with_this_process()
         print(f"serving {REPO} — ctrl-c to stop", flush=True)
         if usage_api.sharing():
             print("sharing anonymous usage counts, once a day; turn it off on the About page "

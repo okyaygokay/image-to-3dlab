@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
@@ -129,8 +128,12 @@ RIG_JOBS = RigJobManager()
 
 
 def build_command(job: RigJob, blender: Path) -> list[str]:
+    # The .blend is the user's upload: --disable-autoexec keeps its Python drivers and
+    # startup scripts from running whatever the user's Auto Run preference says, and
+    # --factory-startup leaves their add-ons out. Both before the file, as Blender applies
+    # arguments in order. Rigify's finalize script ignores autoexec, so the worker clears it.
     return [
-        str(blender), "--background", str(job.scene_path),
+        str(blender), "--background", "--factory-startup", "--disable-autoexec", str(job.scene_path),
         "--python-exit-code", "1", "--python", str(WORKER), "--",
         str(job.asset_path), str(job.sidecar_path), str(job.result_glb),
         str(job.result_blend), str(job.result_sidecar), str(job.report_path),
@@ -148,11 +151,11 @@ def run_job(job: RigJob, manager: RigJobManager = RIG_JOBS) -> None:
         job.status = "running"
         job.emit({"phase": "validate", "overall_pct": 5, "message": "Inputs verified"})
         job.process = subprocess.Popen(
-            build_command(job, blender), cwd=str(REPO), env={**os.environ, "PYTHONUNBUFFERED": "1"},
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+            build_command(job, blender), cwd=str(REPO), env=processes.child_env(),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, **processes.TEXT_PIPE,
             **processes.group_popen_kwargs(),
         )
-        job.directory.joinpath("pid").write_text(str(job.process.pid))
+        job.directory.joinpath("pid").write_text(str(job.process.pid), encoding="utf-8")
         assert job.process.stdout is not None
         for raw in job.process.stdout:
             line = raw.rstrip("\n")

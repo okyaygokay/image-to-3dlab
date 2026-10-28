@@ -451,7 +451,8 @@ def remote_command(job: ImageJob) -> list[str]:
     downstream (the provenance sidecar, the chain's next step) has to know.
     """
     request = job.directory / "colab_request.json"
-    request.write_text(json.dumps({"prompt": job.prompt, "settings": job.settings}))
+    request.write_text(json.dumps({"prompt": job.prompt, "settings": job.settings}),
+                       encoding="utf-8")
     return [
         sys.executable, "-u", str(REPO / "scripts" / "colab_generate.py"),
         str(request), str(job.output_path), "--backend", "qwen_image", "--yes",
@@ -549,7 +550,7 @@ def run_job(job: ImageJob, manager: ImageJobManager,
             record = provenance(job.prompt, job.settings, elapsed, job.output_path)
             if job.reference:
                 record["reference"] = {"picture": job.reference.name, "mode": job.mode}
-            sidecar.write_text(json.dumps(record, indent=2))
+            sidecar.write_text(json.dumps(record, indent=2), encoding="utf-8")
             job.set_status("done", result_url=f"/api/image/{job.id}/result.png",
                            elapsed_seconds=round(elapsed, 1))
             usage_api.count_done("picture")

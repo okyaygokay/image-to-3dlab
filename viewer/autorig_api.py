@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import subprocess
 import sys
@@ -541,8 +540,8 @@ def run_job(job: AnimateJob, manager: AnimateJobManager = ANIMATE_JOBS) -> None:
         for command, cwd in job.commands:
             job.process = subprocess.Popen(
                 command, cwd=str(cwd),
-                env={**os.environ, "PYTHONUNBUFFERED": "1", "HF_HUB_OFFLINE": "1"},
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                env=processes.child_env(HF_HUB_OFFLINE="1"),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, **processes.TEXT_PIPE,
                 **processes.group_popen_kwargs(),
             )
             assert job.process.stdout is not None
@@ -565,9 +564,10 @@ def run_job(job: AnimateJob, manager: AnimateJobManager = ANIMATE_JOBS) -> None:
                       "log_tail": "\n".join(job.log_lines)[-6000:]})
         else:
             job.result.with_suffix(".provenance.json").write_text(
-                json.dumps(job.record, indent=2))
-            job.status = "done"
-            usage_api.count_done("rig" if job.kind == "rig" else "animation")
+                json.dumps(job.record, indent=2), encoding="utf-8")
+            # The done event (with the file's path) goes out BEFORE the status flips: a plan polls
+            # the status and reads the last event, and the fit check takes seconds. The other order
+            # lost a robot's rig mid-plan (2026-10-25).
             fit = rig_fit(job.result) if job.kind == "rig" else {}
             job.emit({"phase": "done", "overall_pct": 100,
                       "message": fit.get("message") or ("Rigged" if job.kind == "rig" else "Animated"),
@@ -577,6 +577,8 @@ def run_job(job: AnimateJob, manager: AnimateJobManager = ANIMATE_JOBS) -> None:
                       if REPO / "output" in job.result.parents else None,
                       "result_url": served_url(job.result),
                       "size_bytes": job.result.stat().st_size})
+            job.status = "done"
+            usage_api.count_done("rig" if job.kind == "rig" else "animation")
     except Exception as exc:
         job.status = "error"
         job.emit({"phase": "error", "message": str(exc)})
@@ -609,6 +611,6 @@ def served_url(path: Path) -> str | None:
 
 def _read_json(path: Path) -> dict[str, Any] | None:
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
