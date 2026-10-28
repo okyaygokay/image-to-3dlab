@@ -271,6 +271,17 @@ def sync_tree(session: str) -> None:
     log(f"synced the run's code to {REMOTE_ROOT} on the VM ({size / 1024:.0f} KB, one upload)")
 
 
+#: Lines a human should see from an install, the moment they are read: what is being
+#: installed, and the markers that pin a "ran nothing at all" failure in one shot.
+INSTALL_LINES = ("error", "  $", "echo", "Cannot", "This installs", "Refusing", "SETUP_")
+
+#: How long a live install channel may stay fully quiet before it is called dead. The
+#: remote side beats every 30s while its bootstrap runs, so this is twenty missed beats
+#: in a row — found live on 2026-10-28: a channel whose transport died at minute one
+#: hung to the 3600s timeout while the job behind it looked busy the whole time.
+INSTALL_SILENCE_SECONDS = 600
+
+
 def ensure_remote_setup(session: str, backend: str, *, skip: bool) -> None:
     """Install the backend on the VM once per session."""
     spec = BACKENDS[backend]
@@ -290,34 +301,67 @@ def ensure_remote_setup(session: str, backend: str, *, skip: bool) -> None:
     log("this is the slow part: 15-30 minutes, and it happens once per VM, not once per job")
     # --yes: the confirmation is the announcement above, made locally. Asking again on a
     # stdin nobody is attached to would hang the job.
-    # The subprocess's output is captured and reprinted by the kernel itself, because the
-    # exec channel only relays the kernel's own prints -- a bootstrap's stdout and stderr
-    # (including the one line that says why it died) otherwise never cross the websocket,
-    # which is exactly how a real failure surfaced as a bare "SETUP_EXIT 1" with nothing
-    # to act on. The tail is bounded: progress bars are noise, the end is where uv and the
-    # bootstraps say what went wrong. The two marker lines before it (kernel version,
-    # script size) pin down the "ran nothing at all" class of failure in one shot.
+    # The bootstrap's own output does not cross the websocket as it happens — the exec
+    # channel only relays the kernel's own prints — so the kernel relays it: the lines
+    # worth reading are printed the moment they are read, and a beat every 30s says the
+    # subprocess is alive. Before this, an install was invisible for its whole run and a
+    # dead channel was indistinguishable from a healthy one for up to an hour — on
+    # 2026-10-28 that exact silence read as "stuck" and a healthy 45-minute install was
+    # killed by hand. The beats also give `silence_seconds` something to trust: fully
+    # quiet for INSTALL_SILENCE_SECONDS means the link is dead, and the channel is killed
+    # and named instead of hung to the 3600s timeout. The failure tail is still printed
+    # at the end, bounded: progress bars are noise, the end is where uv and the bootstraps
+    # say what went wrong, and the two marker lines before it (kernel version, script
+    # size) pin down the "ran nothing at all" class of failure in one shot.
     code = (
-        f"import os, subprocess, sys\n"
+        f"import io, os, subprocess, sys, threading, time\n"
         f"script = {REMOTE_ROOT + '/' + spec['setup']!r}\n"
         f"print('SETUP_PY', sys.version.split()[0], sys.executable)\n"
         f"print('SETUP_SCRIPT', os.path.exists(script),\n"
         f"      os.path.getsize(script) if os.path.exists(script) else -1)\n"
-        f"p = subprocess.run([sys.executable, script, '--yes'], cwd={REMOTE_ROOT!r},\n"
-        f"                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,\n"
-        f"                   text=True, errors='replace')\n"
-        f"print(p.stdout[-12000:])\n"
+        f"p = subprocess.Popen([sys.executable, script, '--yes'], cwd={REMOTE_ROOT!r},\n"
+        f"                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)\n"
+        f"chunks = []\n"
+        f"stream = io.TextIOWrapper(p.stdout, errors='replace')\n"
+        f"def relay():\n"
+        f"    for line in stream:\n"
+        f"        chunks.append(line)\n"
+        f"        if line.rstrip().startswith({INSTALL_LINES!r}):\n"
+        f"            print(line, end='', flush=True)\n"
+        f"    p.wait()\n"
+        f"def beat():\n"
+        f"    while p.poll() is None:\n"
+        f"        print('INSTALL_BEAT', int(time.time()), flush=True)\n"
+        f"        time.sleep(30)\n"
+        f"threading.Thread(target=beat, daemon=True).start()\n"
+        f"relay()\n"
+        f"out = ''.join(chunks)\n"
+        f"if p.returncode != 0:\n"
+        f"    print(out[-12000:], flush=True)\n"
         f"print('SETUP_EXIT', p.returncode)\n"
     )
+    # Show the install as it happens: each beat as one friendly line (the raw beat is
+    # for the watchdog, not the log), each line that matters the moment it crosses.
+    started = time.time()
+    seen = [""]
+
+    def live(chunk: str) -> None:
+        seen[0] += chunk
+        lines = seen[0].split("\n")
+        seen[0] = lines.pop()
+        for text in lines:
+            if text.startswith("INSTALL_BEAT"):
+                minutes = max(1, int((time.time() - started) // 60))
+                log(f"[install {minutes}m] still working on the VM")
+            elif text.startswith(INSTALL_LINES):
+                emit(text)
+
     output = colab.run(["exec", "-s", session, "--timeout", "3600"],
-                       stdin=code, timeout=3900, attempts=2)
-    # Stream the useful lines as they arrive, but keep the whole thing: an earlier version
-    # filtered to a few prefixes and threw away the one line saying why the install failed,
-    # leaving "SETUP_EXIT 1" and nothing else to act on.
-    for line in output.splitlines():
-        if line.startswith(("error", "  $", "echo", "Cannot", "This installs",
-                            "Refusing", "SETUP_")):
-            emit(line)
+                       stdin=code, timeout=3900, attempts=2,
+                       silence_seconds=INSTALL_SILENCE_SECONDS, on_output=live)
+    # The whole output is still checked, not just what was worth showing live: an earlier
+    # version filtered to a few prefixes and threw away the one line saying why the
+    # install failed, leaving "SETUP_EXIT 1" and nothing else to act on.
     if "SETUP_EXIT 0" not in output:
         raise colab.ColabError(
             f"installing {spec['label']} on the VM failed. Full output follows.\n"

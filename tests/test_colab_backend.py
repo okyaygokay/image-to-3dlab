@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -499,3 +500,37 @@ def test_the_shared_session_is_not_a_warm_session_of_any_backend(tmp_path):
     cb.touch(cb.SHARED_SESSION, path=path, now=now - 60)
     assert cb.warm_session("hi3d", path=path, now=now,
                           live={cb.SHARED_SESSION}) is None
+
+
+# --- a channel that dies silently (found live 2026-10-28) -----------------------------------
+
+
+def test_a_channel_that_goes_silent_is_killed_and_named(tmp_path, monkeypatch):
+    """A dead exec channel prints what it has and then nothing, for as long as its
+    timeout allows — found live, hanging to 3600s while the job behind it looked busy
+    the whole time. Silence past the caller's threshold kills the channel and names the
+    session, and is not retried: twenty missed beats in a row already is the answer."""
+    cli = tmp_path / "colab"
+    cli.write_text("#!/bin/sh\necho one line\nsleep 30\n")
+    cli.chmod(0o755)
+    monkeypatch.setattr(cb, "colab_bin", lambda: str(cli))
+    began = time.monotonic()
+    with pytest.raises(cb.ColabError, match="session 'i2l-lab' went silent"):
+        cb.run(["exec", "-s", "i2l-lab", "--timeout", "60"], timeout=60,
+               attempts=2, silence_seconds=0.5)
+    assert time.monotonic() - began < 10  # killed fast — and no 20s retry backoff either
+
+
+def test_a_channel_that_keeps_talking_is_left_alone(tmp_path, monkeypatch):
+    """The watchdog's whole point is telling a dead link from a busy one, so a channel
+    that keeps talking must run to its natural end, with its lines crossing live."""
+    cli = tmp_path / "colab"
+    cli.write_text(
+        "#!/bin/sh\ni=0\nwhile [ $i -lt 5 ]; do echo line $i; sleep 0.2; i=$((i+1)); done\n")
+    cli.chmod(0o755)
+    monkeypatch.setattr(cb, "colab_bin", lambda: str(cli))
+    seen = []
+    output = cb.run(["exec", "-s", "s", "--timeout", "30"], timeout=30,
+                    silence_seconds=5, on_output=seen.append)
+    assert "line 4" in output
+    assert seen and seen[0] == "line 0\n"  # crossed as it happened, not at the end

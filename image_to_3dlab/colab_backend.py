@@ -31,6 +31,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -298,7 +299,8 @@ def colab_bin() -> str:
 
 
 def run(args: list[str], *, timeout: float = 180, stdin: str | None = None,
-        attempts: int = 1) -> str:
+        attempts: int = 1, silence_seconds: float | None = None,
+        on_output=None) -> str:
     """One `colab` invocation, bounded. Returns combined output.
 
     The bound matters: `colab exec` blocks on a fresh VM's kernel, and an unbounded child
@@ -310,6 +312,15 @@ def run(args: list[str], *, timeout: float = 180, stdin: str | None = None,
     treating the first silence or reset as a dead session. A non-zero exit is retried
     only when the CLI's own words say the transport dropped (a reset, a broken pipe):
     a command that ran and failed has made its side effects, and must not run again.
+
+    ``on_output`` and ``silence_seconds`` serve the one call that runs for the better
+    part of an hour (a first-run install, whose remote side prints a beat every 30s
+    while it works — see scripts/colab_generate.py). ``on_output`` receives each line
+    as it crosses the channel, and a channel that goes fully quiet for
+    ``silence_seconds`` is killed and named on the spot rather than waited out: found
+    live on 2026-10-28, a dead exec channel hung to its 3600s timeout while the job
+    behind it looked busy the whole time. Silence is not retried — twenty missed beats
+    in a row already is the answer.
     """
     transient = re.compile(
         r"Connection aborted|ConnectionResetError|BrokenPipeError|Broken pipe|"
@@ -318,6 +329,39 @@ def run(args: list[str], *, timeout: float = 180, stdin: str | None = None,
         re.IGNORECASE)
     last = ""
     for attempt in range(1, max(1, attempts) + 1):
+        combined, returncode = _invoke(
+            args, stdin=stdin, timeout=timeout,
+            silence_seconds=silence_seconds, on_output=on_output)
+        if returncode is None:  # the overall timeout hit
+            last = (f"`colab {args[0]}` did not answer within {timeout:.0f}s")
+            if attempt < attempts:
+                time.sleep(20 * attempt)
+                continue
+            raise ColabError(
+                f"{last}. The VM may still be starting; retry, or stop the session and "
+                f"start a new one."
+            )
+        if returncode != 0:
+            if attempt < attempts and transient.search(combined):
+                last = f"`colab {args[0]}` hit a network blip (attempt {attempt})"
+                time.sleep(20 * attempt)
+                continue
+            raise ColabError(f"`colab {args[0]}` failed:\n{combined.strip()[-1500:]}")
+        return combined
+    raise ColabError(last or f"`colab {args[0]}` failed")
+
+
+def _invoke(args: list[str], *, stdin: str | None, timeout: float,
+            silence_seconds: float | None, on_output) -> tuple[str, int | None]:
+    """One CLI invocation: its output and exit code, or ``(output, None)`` on timeout.
+
+    The plain path stays `subprocess.run` so the many short calls (and a faked CLI in
+    tests) keep their exact shape. The streaming path exists to watch a long one: it
+    reads line by line in a thread, hands each line to ``on_output``, and kills a
+    channel whose silence has outlasted ``silence_seconds`` (raising, not returning —
+    see `run`).
+    """
+    if on_output is None and silence_seconds is None:
         try:
             proc = subprocess.run(
                 [colab_bin(), *args],
@@ -328,23 +372,68 @@ def run(args: list[str], *, timeout: float = 180, stdin: str | None = None,
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            last = (f"`colab {args[0]}` did not answer within {timeout:.0f}s")
-            if attempt < attempts:
-                time.sleep(20 * attempt)
-                continue
-            raise ColabError(
-                f"{last}. The VM may still be starting; retry, or stop the session and "
-                f"start a new one."
-            )
-        combined = (proc.stdout or "") + (proc.stderr or "")
-        if proc.returncode != 0:
-            if attempt < attempts and transient.search(combined):
-                last = f"`colab {args[0]}` hit a network blip (attempt {attempt})"
-                time.sleep(20 * attempt)
-                continue
-            raise ColabError(f"`colab {args[0]}` failed:\n{combined.strip()[-1500:]}")
-        return combined
-    raise ColabError(last or f"`colab {args[0]}` failed")
+            return "", None
+        return (proc.stdout or "") + (proc.stderr or ""), proc.returncode
+
+    proc = subprocess.Popen(
+        [colab_bin(), *args],
+        stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, errors="replace",
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},  # the CLI must not sit on its output
+    )
+    chunks: list[str] = []
+    received = [time.monotonic()]
+
+    def _read() -> None:
+        assert proc.stdout is not None
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                return
+            chunks.append(line)
+            received[0] = time.monotonic()
+            if on_output is not None:
+                on_output(line)
+
+    reader = threading.Thread(target=_read, daemon=True)
+    reader.start()
+    timed_out = False
+    try:
+        if proc.stdin is not None:
+            try:
+                proc.stdin.write(stdin)
+            except OSError:  # the CLI died before reading; its exit tells the story
+                pass
+            finally:
+                proc.stdin.close()
+        deadline = time.monotonic() + timeout
+        while proc.poll() is None:
+            quiet = time.monotonic() - received[0]
+            if silence_seconds is not None and quiet > silence_seconds:
+                proc.kill()
+                raise _silent_channel_error(args, quiet)
+            if time.monotonic() >= deadline:
+                proc.kill()
+                timed_out = True
+                break
+            time.sleep(0.2)
+    finally:
+        reader.join(timeout=5)
+    if timed_out:
+        return "", None
+    return "".join(chunks), proc.returncode
+
+
+def _silent_channel_error(args: list[str], quiet_for: float) -> ColabError:
+    session = args[args.index("-s") + 1] if "-s" in args else None
+    named = f" on session '{session}'" if session else ""
+    return ColabError(
+        f"the exec channel{named} went silent for {quiet_for:.0f}s with the job still "
+        f"out there -- a dead link, not a slow one. The job was stopped rather than left "
+        f"hanging; retry it. If the channel keeps dying, stop the session and let the "
+        f"next job start a fresh VM."
+    )
 
 
 def session_exists(session: str) -> bool:

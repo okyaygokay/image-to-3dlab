@@ -1440,7 +1440,7 @@ def _reconcile_orphaned_jobs(output_root: Path) -> list[str]:
 
 
 # Progress chatter the generator emits constantly; never the reason it stopped.
-_LOG_NOISE = re.compile(r"^(\[rss |Sampling |Loading |Pipeline loaded|\s*$)|\|\s*\d+/\d+ \[")
+_LOG_NOISE = re.compile(r"^(\[rss |\[install |Sampling |Loading |Pipeline loaded|\s*$)|\|\s*\d+/\d+ \[")
 
 
 def out_of_memory_reason(log_lines) -> str | None:

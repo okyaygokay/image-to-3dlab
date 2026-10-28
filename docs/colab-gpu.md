@@ -34,7 +34,10 @@ python scripts/colab_generate.py photo.png out.glb --backend hi3d --accelerator 
 ```
 
 The first job on a fresh VM installs the backend (15–30 minutes, ~14.7 GB for Hi3D). After
-that the session is warm; a second job is just the generation.
+that the session is warm; a second job is just the generation. The install is not a silent
+wait: the studio's log carries `[install 3m] still working on the VM` beats and the lines
+that matter as they happen, and an install channel that goes quiet for ten minutes is
+declared dead and fails with the session named rather than hanging for the hour.
 
 | Flag | Default | What it does |
 |---|---|---|

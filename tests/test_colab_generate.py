@@ -169,6 +169,85 @@ def test_writing_a_status_survives_a_dead_session(monkeypatch):
     cg.write_remote_status("s", "/jobs/1", "error", "detail")
 
 
+# --- the install talks while it runs (found silent live, 2026-10-28) ------------------------
+
+
+def test_the_install_beats_and_relays_its_lines_while_it_runs(monkeypatch, capsys):
+    """An install used to be invisible for its whole run — its output was captured on
+    the VM and printed once at the end — so a healthy install and a channel that died at
+    minute one looked identical from here for up to an hour, and on 2026-10-28 the
+    healthy one was killed by hand at minute 45 on exactly that confusion. Now the
+    channel beats every 30s (watched by a silence timeout) and relays the lines that
+    matter, live."""
+    calls = []
+
+    def fake_run(args, *, timeout=180, stdin=None, attempts=1,
+                 silence_seconds=None, on_output=None):
+        calls.append({"args": args, "stdin": stdin or "",
+                      "silence": silence_seconds, "on": on_output})
+        text = calls[-1]["stdin"]
+        if "print('STAMP'" in text:      # the probe
+            return "MISSING"
+        if text.startswith("open("):     # the stamp write after a good install
+            return ""
+        assert on_output is not None, "the install exec must stream"
+        stream = ("SETUP_PY 3.13.16 /usr/bin/python3\n"
+                  "INSTALL_BEAT 1790000000\n"
+                  "  $ uv pip install torch\n"
+                  "SETUP_EXIT 0\n")
+        on_output(stream)
+        return stream
+
+    monkeypatch.setattr(cg.colab, "run", fake_run)
+    cg.ensure_remote_setup("i2l-lab", "hi3d", skip=False)
+    out = capsys.readouterr().out
+    assert "[install 1m] still working on the VM" in out
+    assert "uv pip install torch" in out        # the line that matters, live
+    assert "INSTALL_BEAT" not in out            # the raw beat is for the watchdog only
+    install = calls[1]
+    assert install["silence"] == cg.INSTALL_SILENCE_SECONDS
+    assert "INSTALL_BEAT" in install["stdin"]      # the beat is printed out there…
+    assert "for line in stream" in install["stdin"]  # …and the output relayed as it is read
+    assert calls[2]["stdin"].startswith("open(")   # the stamp landed: the next job skips all this
+
+
+def test_a_failed_install_still_reports_its_tail(monkeypatch):
+    """What the relay shows live is a courtesy; what the run is judged on is still the
+    whole output — an earlier version filtered to a few prefixes and left a bare
+    "SETUP_EXIT 1" with nothing to act on."""
+    def fake_run(args, *, timeout=180, stdin=None, attempts=1,
+                 silence_seconds=None, on_output=None):
+        if "STAMP" in (stdin or ""):
+            return "MISSING"
+        stream = ("SETUP_PY 3.13.16 /usr/bin/python3\n"
+                  "error: failed to build wheel for flash-attn\n"
+                  "SETUP_EXIT 1\n")
+        if on_output is not None:
+            on_output(stream)
+        return stream
+
+    monkeypatch.setattr(cg.colab, "run", fake_run)
+    with pytest.raises(cg.colab.ColabError, match="failed to build wheel"):
+        cg.ensure_remote_setup("i2l-lab", "hi3d", skip=False)
+
+
+def test_the_install_payload_is_valid_python(monkeypatch):
+    """The payload is f-string-built and runs on a VM that is billing by the minute; a
+    syntax error out there is a paid run wasted. It must parse before it ships."""
+    def fake_run(args, *, timeout=180, stdin=None, attempts=1,
+                 silence_seconds=None, on_output=None):
+        text = stdin or ""
+        if "print('STAMP'" in text:
+            return "MISSING"
+        if text.startswith("open("):
+            return ""
+        compile(text, "<install payload>", "exec")
+        return "SETUP_EXIT 0\n"
+
+    monkeypatch.setattr(cg.colab, "run", fake_run)
+    cg.ensure_remote_setup("i2l-lab", "hi3d", skip=False)
+
+
 # --- argument handling ---------------------------------------------------------------------
 
 

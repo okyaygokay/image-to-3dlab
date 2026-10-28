@@ -74,6 +74,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `move_description` advanced choice. See [docs/colab-gpu.md](docs/colab-gpu.md).
 
 ### Fixed
+- **A first-run install is now seen living, and a channel that dies fails fast.** Found
+  live on 2026-10-28: an install's output was captured on the VM and printed once at the
+  end, so for its whole run (up to an hour) a healthy install and an exec channel whose
+  transport had died looked identical from the studio — and on exactly that confusion a
+  healthy 45-minute install was killed by hand. The kernel on the VM now relays the
+  lines that matter the moment they are read and prints a beat every 30s while the
+  bootstrap runs; the beats show up in the studio's log (`[install 3m] still working…`),
+  and a channel that goes fully quiet for ten minutes — twenty missed beats — is killed
+  and named (session, and what to do) instead of hanging to the 3600s timeout.
 - **Mitten hands stop flapping.** A rig whose hands have no finger chains (SkinTokens
   gives the hero model two stub bones per hand) used to copy SOMA's middle finger onto
   those stubs, so the whole mitten flapped with the hand tracker's frame-to-frame noise
