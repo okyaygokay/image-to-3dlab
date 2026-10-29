@@ -47,20 +47,14 @@ BASE = Path("/")
 #: out to the cloud, and that cache lives on this same disk.
 HEADROOM_GB = 30
 
-#: What each backend's install consists of, as paths relative to ``/``: the vendor
-#: trees the bootstraps build, the Hugging Face cache dirs their weights fill, and the
-#: stamp is added by the code. qwen_image's HF dirs are verified against a live
-#: install (2026-10-29); the rest are read off their bootstraps and the du of a
-#: stuffed VM — a wrong entry fails safe: the restore refuses, the install runs.
+#: What each backend's install consists of, as paths relative to ``BASE``: the vendor
+#: trees the bootstraps build (weights land inside them — the HF cache keeps only
+#: metadata stubs, verified live 2026-10-29), and the stamp is added by the code.
+#: qwen_image's entry is verified against a live install; the rest are read off their
+#: bootstraps and the du of a stuffed VM — a wrong entry fails safe: the restore
+#: refuses, the install runs.
 PIECES = {
-    "qwen_image": (
-        ("content/i2l/vendor/sdcpp",),
-        ("root/.cache/huggingface/hub/models--Comfy-Org--Qwen-Image-2.1",
-         "root/.cache/huggingface/hub/models--Qwen--Qwen3-VL-8B-Instruct-GGUF",
-         "root/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B",
-         "root/.cache/huggingface/hub/models--leejet--Qwen-Image-2.1-GGUF",
-         "root/.cache/huggingface/hub/models--openai--clip-vit-large-patch14"),
-    ),
+    "qwen_image": (("content/i2l/vendor/sdcpp",), ()),
     "autorig": (("content/i2l/vendor/SkinTokens",), ()),
     "pixal3d": (("content/i2l/vendor/pixal3d-cpp",), ()),
     "prompt2rig": (("content/i2l/vendor/prompt2rig", "content/i2l/vendor/prompt2rig-driver"), ()),
