@@ -345,14 +345,39 @@ def restore_from_drive(session: str, backend: str, spec: dict) -> bool:
     return False
 
 
+def drive_mounted(session: str) -> bool:
+    """Whether the Google Drive is mounted on the VM, right now.
+
+    The mount lives and dies with the VM's kernel (found live, 2026-10-29: a healthy
+    mount vanished across a kernel restart, and every remount asks the person for
+    their Allow click again — Google's ephemeral credentials do not outlive the
+    kernel), so this is asked fresh each time it matters, never remembered.
+    """
+    try:
+        output = colab.run(["exec", "-s", session, "--timeout", "30"], attempts=1,
+                           stdin="import os\n"
+                                 "print('DRIVE' if os.path.isdir('/content/drive/MyDrive') "
+                                 "else 'NONE')",
+                           timeout=90)
+    except colab.ColabError:
+        return False
+    return "DRIVE" in output
+
+
 def archive_to_drive(session: str, backend: str) -> None:
     """Copy the just-finished install to the Google Drive archive, in the background.
 
     Detached like the prefetch: the next legs need the VM, the archive needs only its
-    idle minutes. A Drive that is not mounted, or room the VM cannot spare, is said in
-    drive-archive.log and costs nothing (the archiver refuses quietly, never fails a
-    job for lack of a place to copy itself).
+    idle minutes. A Drive that is not mounted (kernels die and take the mount with
+    them) is said out loud — the person's one click in the studio's VM panel is what
+    keeps installs across VMs — and a Drive without room is said in drive-archive.log;
+    neither ever fails a job.
     """
+    if not drive_mounted(session):
+        log(f"Google Drive is not mounted on this VM, so {backend} will not be kept "
+            f"across VMs — mount it from the studio's VM panel (one click) and the "
+            f"next install archives itself")
+        return
     code = (
         "import subprocess, sys\n"
         f"argv = [sys.executable, {REMOTE_ROOT + '/scripts/colab_archive.py'!r},\n"

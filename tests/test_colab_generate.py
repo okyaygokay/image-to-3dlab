@@ -192,6 +192,8 @@ def test_the_install_beats_and_relays_its_lines_while_it_runs(monkeypatch, capsy
             return ""
         if "'restore'" in text:          # the Drive archive, tried before installing
             return "[archive] no hi3d archive on Google Drive\nRESTORE_EXIT 1\n"
+        if "'DRIVE'" in text:            # the mount preflight before archiving
+            return "DRIVE\n"
         if "'archive'" in text:          # the post-install copy to Drive, detached
             return ""
         assert on_output is not None, "the install exec must stream"
@@ -213,7 +215,8 @@ def test_the_install_beats_and_relays_its_lines_while_it_runs(monkeypatch, capsy
     assert "INSTALL_BEAT" in install["stdin"]      # the beat is printed out there…
     assert "for line in stream" in install["stdin"]  # …and the output relayed as it is read
     assert calls[3]["stdin"].startswith("open(")   # the stamp landed: the next job skips all this
-    assert "colab_archive.py" in calls[4]["stdin"]  # and the install archives itself to Drive
+    assert "'DRIVE'" in calls[4]["stdin"]          # the mount is asked before archiving
+    assert "colab_archive.py" in calls[5]["stdin"]  # and the install archives itself to Drive
 
 
 def test_a_backend_restores_from_the_google_drive_archive_instead_of_installing(
@@ -254,6 +257,8 @@ def test_the_install_archives_itself_to_google_drive_afterwards(monkeypatch, cap
             return "MISSING"
         if "'restore'" in text:
             return "RESTORE_EXIT 1\n"
+        if "'DRIVE'" in text:            # the mount preflight
+            return "DRIVE\n"
         if "'archive'" in text:
             return ""
         stream = "SETUP_PY 3.13.16 /usr/bin/python3\nSETUP_EXIT 0\n"
@@ -267,6 +272,37 @@ def test_the_install_archives_itself_to_google_drive_afterwards(monkeypatch, cap
     assert "colab_archive.py" in archive and "'archive'" in archive
     assert "start_new_session=True" in archive     # detached on the VM
     assert "archiving hi3d to Google Drive" in capsys.readouterr().out
+
+
+def test_an_unmounted_drive_is_said_out_loud_not_quietly_skipped(monkeypatch, capsys):
+    """The mount dies with the VM's kernel, so 'not mounted' at archive time is the
+    common case — and the person must hear it once, in the job's own log, with the one
+    click that fixes it. Never an error: the job just finished, and an archive is a
+    bonus, not a promise."""
+    calls = []
+
+    def fake_run(args, *, timeout=180, stdin=None, attempts=1,
+                 silence_seconds=None, on_output=None):
+        text = stdin or ""
+        calls.append(text)
+        if "print('STAMP'" in text:
+            return "MISSING"
+        if "'restore'" in text:
+            return "RESTORE_EXIT 1\n"
+        if "'DRIVE'" in text:
+            return "NONE\n"              # the kernel died and took the mount with it
+        if "'archive'" in text:
+            raise AssertionError("nothing is archived onto an unmounted Drive")
+        stream = "SETUP_PY 3.13.16 /usr/bin/python3\nSETUP_EXIT 0\n"
+        if on_output is not None:
+            on_output(stream)
+        return stream
+
+    monkeypatch.setattr(cg.colab, "run", fake_run)
+    cg.ensure_remote_setup("i2l-lab", "hi3d", skip=False)
+    out = capsys.readouterr().out
+    assert "not mounted" in out and "VM panel" in out
+    assert not any("'archive'" in text for text in calls)
 
 
 def test_a_failed_install_still_reports_its_tail(monkeypatch):
