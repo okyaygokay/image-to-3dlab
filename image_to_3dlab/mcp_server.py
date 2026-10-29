@@ -38,6 +38,10 @@ STEP_IDS = ("picture", "back", "model", "finished", "split", "rigged", "animated
 # Server actions agents do not get, and why. Everything else the studio can do must be a
 # tool (the test reads the server's routes and checks this list against them).
 STUDIO_ONLY = {
+    "api/colab/console": "the person's own Python prompt on their rented VM; agents reach the VM "
+                         "through the colab wrapper already",
+    "api/colab/drive/mount": "mounting the user's Google Drive walks a consent only they can click",
+    "api/colab/drive/continue": "the 'I clicked Allow' half of the same consent walk",
     "api/fix-spot/preview": "a person marks the spots to fix on screen; guessing spots automatically "
                             "also flattens real shape (fur tufts, mohawk spikes)",
     "api/fix-spot/keep": "keeping a fix is the person's verdict after comparing before and after",
