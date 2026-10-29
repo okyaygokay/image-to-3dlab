@@ -111,6 +111,21 @@ def test_a_missing_drive_or_archive_is_a_quiet_nothing(lab):
     assert ca.restore("pixal3d", root, drive, yes=True) == 1       # a Drive with nothing on it
 
 
+def test_an_unmounted_drive_is_never_reported_as_a_missing_archive(lab, capsys):
+    """Found live (2026-10-29): a run said 'no pixal3d archive on Google Drive' while a
+    12 GB one sat there -- the VM's Drive was simply not mounted, and the person reading
+    the log concluded the archive was gone. The two truths now say their own names."""
+    root, drive, stamp = lab
+    stamp.unlink()
+    unmounted = root.parent / "no-drive" / "i2l"      # its parent does not exist either
+    assert ca.restore("qwen_image", root, unmounted, yes=True) == 1
+    first = capsys.readouterr().out
+    assert "not mounted" in first and "no qwen_image archive" not in first
+    assert ca.restore("pixal3d", root, drive, yes=True) == 1       # mounted, nothing on it
+    second = capsys.readouterr().out
+    assert "no pixal3d archive" in second and "not mounted" not in second
+
+
 def test_every_backend_the_wrapper_knows_has_its_pieces_named():
     """The table covers every backend the wrapper can install — a prefetch or job
     install of any of them can reach the Drive. Entries read off bootstraps still

@@ -161,9 +161,18 @@ def restore(backend: str, root: Path, drive: Path, *, yes: bool) -> int:
         print(f"[archive] {backend} has no pieces named for it yet; "
               f"installing the old way")
         return 1
+    if not drive_ready(drive):
+        # Two different truths, never one message for both (found live, 2026-10-29:
+        # "no pixal3d archive on Google Drive" while a 12 GB one sat there — the VM's
+        # Drive was simply not mounted, and the person reading it concluded the
+        # archive was gone).
+        print(f"[archive] Google Drive is not mounted on this VM, so {backend} cannot "
+              f"restore; installing the old way — mount it from the studio's VM panel "
+              f"and the next VM restores in minutes")
+        return 1
     target = drive / f"{backend}.tar.gz"
-    if not drive_ready(drive) or not target.is_file():
-        print(f"[archive] no {backend} archive on Google Drive; installing the old way")
+    if not target.is_file():
+        print(f"[archive] no {backend} archive on Google Drive yet; installing the old way")
         return 1
     stamp = BASE / stamp_name(backend)
     if stamp.exists():
