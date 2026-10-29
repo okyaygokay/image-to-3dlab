@@ -8,25 +8,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **A Hero body from any engine takes the picture's pixels front *and back*.** The
-  front-camera fit (below) painted only the front; the sides and back kept the engine's
-  own texture. The hero route now draws a back picture from the front photo — Qwen in
-  edit mode, the tested eight-character prompt and seed, run locally or on the rented
-  VM through the `qwen_image` backend's `--exec` leg (the Colab bootstrap grew the
-  vision projector and BiRefNet-lite edit mode needs, ~1 GB) — and fits a second
-  camera, half a turn round, to the same mesh. Pixel Match then paints the back with
-  the drawn photo's pixels, the same "on (front + back)" a two-view Pixal3D run gets.
-  Each picture is cut out first (Pixel Match reads the alpha as its matte; an opaque
-  background would paint itself wherever the mesh projects past the figure). The draw
-  is best-effort: a back that fails to draw leaves the front painted and the run flags
-  it, never sinking the body. A supplied `--back` is reused as that picture.
+- **Installs keep themselves on your Google Drive, and fresh VMs restore instead of
+  re-downloading.** A rented VM is reclaimed and its disk dies with it, so every fresh
+  one re-paid each backend's download and CUDA compile (ten to forty minutes a time).
+  Now every successful install archives itself to the Drive mounted on the VM — one
+  tarball per backend under `Drive/i2l/`, with a manifest naming its backend, size and
+  date — and a fresh VM untars it back, verified piece by piece before the install
+  stamp is written. The failure rule is the whole safety: a restore that lands
+  incomplete refuses to stamp, so the next step installs the old way instead of
+  running on a half-restore. Nothing runs *from* Drive — DriveFS is a cache in front
+  of the cloud (the fast numbers a hot file shows are the cache's; venvs, symlinks
+  and mmapped weights do not survive it): the tarball is the store, the local disk is
+  the runtime. The Drive mounts from the studio's VM panel, whose consent link and
+  continue button walk the one browser click Google asks for.
+- **A GPU VM console in the studio: Python on the rented machine, no terminal.** Every
+  route runs one worked-out thing; the VM button in the header is for everything else —
+  "how much disk is left?", "is Drive mounted?", a quick look at anything. The code runs
+  on the lab's shared session exactly the way job legs run (one bounded `colab exec`,
+  the code on stdin, output streamed line-by-line back to the page), a failed run says
+  so in its own log, and a status line answers with what it knows: VM alive, disk free,
+  Google Drive mounted and its room — an unreachable VM is an answer there, not an
+  error. A Mount Google Drive button drives the CLI's own `drivemount` (mounting may
+  open a consent tab only the person at the machine can click), for keeping finished
+  models in — not installs: mounted Drive is FUSE, nothing installed there runs, and
+  the lab installs from the network as ever.
+- **The prefetch's disk guard is told the truth about the Animate pair.** prompt2rig
+  was listed at 75 GB and measured 116 (53 engine + 63 driver) live on 2026-10-28 —
+  the guard waved the install through and the disk filled out from under the next job's
+  Pixal3D install, which died mid-extract at 1 GB free. The table now says 130 (and
+  qwen_image 16, measured the same day), so a VM that cannot hold an install skips it
+  and the job that needs the room keeps it.
+- **A Hero body from any engine takes the picture's pixels all round — from views
+  *rendered from its own mesh*.** The front-camera fit (below) painted only the front;
+  the sides and back kept the engine's own texture. The angles nobody photographed are
+  now made as pictures of the actual geometry: the mesh is rendered through its fitted
+  cameras with the Finish's own Blender (flat clay, transparent surround), and Qwen in
+  edit mode recolours each render from a card that carries the front's cut-out as a
+  colour reference — the edit keeps composition, so the recoloured region is still
+  exactly what that camera sees, and the render's own alpha comes back as the view's
+  matte. Pixel Match then paints the body from the real photo and these views. A
+  freely *drawn* back was tried first and rejected on the real blacksmith: Qwen
+  invented crossed apron straps on a mesh whose back is a full apron — a drawn view
+  can disagree with the geometry; a rendered one cannot. Every step is best-effort: a
+  render or repaint that fails drops its view (said in the run), and the front alone
+  still paints. A supplied `--back` is a real photograph and wins over a made one.
+  Synthetic views frame generously (the limiting axis fills the frame) — a compromise
+  focal zoomed a T-pose's height out of a side view (2026-10-28). The Colab Qwen
+  bootstrap carries edit mode's needs: the vision projector (0.75 GB) and
+  BiRefNet-lite (224 MB, md5-checked).
 - **A bare body keeps its shape instead of being built again.** A body that ships
   geometry only (Hi3D) used to be thrown away and rebuilt from the picture with
   Pixal3D, because a direct Pixel Match had no atlas to paint into (a smart-UV unwrap
   of the engine's own million faces fragmented to ~1% of the texture). It is now
   resurfaced by Finish's classic route — the voxel remesh keeps its shape at the
   route's own face count, with a dense atlas — and the fitted cameras paint it from
-  the photo, front and drawn back, exactly as a textured foreign body is painted.
+  the photo and the repainted views, exactly as a textured foreign body is painted.
 - **A Hero body from any engine takes the picture's pixels too.** A Hero face on a
   Hi3D/TRELLIS body used to leave the whole body on the engine's own texture: those
   runs save no cameras, so Pixel Match had nothing to paint through. The hero route now

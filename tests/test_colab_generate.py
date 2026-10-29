@@ -190,6 +190,10 @@ def test_the_install_beats_and_relays_its_lines_while_it_runs(monkeypatch, capsy
             return "MISSING"
         if text.startswith("open("):     # the stamp write after a good install
             return ""
+        if "'restore'" in text:          # the Drive archive, tried before installing
+            return "[archive] no hi3d archive on Google Drive\nRESTORE_EXIT 1\n"
+        if "'archive'" in text:          # the post-install copy to Drive, detached
+            return ""
         assert on_output is not None, "the install exec must stream"
         stream = ("SETUP_PY 3.13.16 /usr/bin/python3\n"
                   "INSTALL_BEAT 1790000000\n"
@@ -204,11 +208,65 @@ def test_the_install_beats_and_relays_its_lines_while_it_runs(monkeypatch, capsy
     assert "[install 1m] still working on the VM" in out
     assert "uv pip install torch" in out        # the line that matters, live
     assert "INSTALL_BEAT" not in out            # the raw beat is for the watchdog only
-    install = calls[1]
+    install = calls[2]                          # probe, restore attempt, then the install
     assert install["silence"] == cg.INSTALL_SILENCE_SECONDS
     assert "INSTALL_BEAT" in install["stdin"]      # the beat is printed out there…
     assert "for line in stream" in install["stdin"]  # …and the output relayed as it is read
-    assert calls[2]["stdin"].startswith("open(")   # the stamp landed: the next job skips all this
+    assert calls[3]["stdin"].startswith("open(")   # the stamp landed: the next job skips all this
+    assert "colab_archive.py" in calls[4]["stdin"]  # and the install archives itself to Drive
+
+
+def test_a_backend_restores_from_the_google_drive_archive_instead_of_installing(
+        monkeypatch, capsys):
+    """A VM is cattle and its disk dies with it; the Drive archive is the lab's memory.
+    When the archive holds the backend, the restore replaces the whole download-and-
+    compile, says so in the log, and no install payload is ever sent."""
+    def fake_run(args, *, timeout=180, stdin=None, attempts=1,
+                 silence_seconds=None, on_output=None):
+        text = stdin or ""
+        if "print('STAMP'" in text:
+            return "MISSING"
+        assert "'restore'" in text       # the archive is tried before anything installs
+        stream = ("[archive] hi3d restored from Google Drive (15.5 GB gz, 180s)\n"
+                  "RESTORE_EXIT 0\n")
+        if on_output is not None:
+            on_output(stream)
+        return stream
+
+    monkeypatch.setattr(cg.colab, "run", fake_run)
+    cg.ensure_remote_setup("i2l-lab", "hi3d", skip=False)
+    out = capsys.readouterr().out
+    assert "restored from Google Drive" in out
+    assert "installing" not in out       # the install never started
+
+
+def test_the_install_archives_itself_to_google_drive_afterwards(monkeypatch, capsys):
+    """A finished install copies itself to the Drive archive in the background —
+    detached, so the pipeline's next legs are not kept waiting — and the copy never
+    fails the job: a Drive that refuses is a note in a log, not an error."""
+    calls = []
+
+    def fake_run(args, *, timeout=180, stdin=None, attempts=1,
+                 silence_seconds=None, on_output=None):
+        text = stdin or ""
+        calls.append(text)
+        if "print('STAMP'" in text:
+            return "MISSING"
+        if "'restore'" in text:
+            return "RESTORE_EXIT 1\n"
+        if "'archive'" in text:
+            return ""
+        stream = "SETUP_PY 3.13.16 /usr/bin/python3\nSETUP_EXIT 0\n"
+        if on_output is not None:
+            on_output(stream)
+        return stream
+
+    monkeypatch.setattr(cg.colab, "run", fake_run)
+    cg.ensure_remote_setup("i2l-lab", "hi3d", skip=False)
+    archive = calls[-1]
+    assert "colab_archive.py" in archive and "'archive'" in archive
+    assert "start_new_session=True" in archive     # detached on the VM
+    assert "archiving hi3d to Google Drive" in capsys.readouterr().out
 
 
 def test_a_failed_install_still_reports_its_tail(monkeypatch):
@@ -773,3 +831,16 @@ def test_the_prefetch_plan_survives_the_trip_to_the_vm(monkeypatch):
     assert plan and all(len(entry) == 3 for entry in plan)
     assert [entry[0] for entry in plan] == [backend for backend in cg.PREFETCH_ORDER
                                            if backend != "hi3d"]
+
+
+def test_prefetch_stays_off_inside_a_multi_leg_pipeline(monkeypatch):
+    """A hero pipeline's legs own the VM's remaining disk between them; a background
+    install eating it mid-flight is what killed the Pixal3D leg at 1 GB free
+    (2026-10-28, twice in one day). The hero route marks its children with
+    I3L_PIPELINE, and the prefetch stands down — nothing is sent anywhere."""
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("no colab call of any kind")
+
+    monkeypatch.setattr(cg.colab, "run", must_not_run)
+    monkeypatch.setenv("I3L_PIPELINE", "1")
+    cg.start_prefetch("i2l-lab", "hi3d")              # returns quietly, calls nothing

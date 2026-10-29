@@ -129,9 +129,12 @@ def setup_stamp(backend: str) -> str:
 
 #: Rough install sizes in GB, for the prefetch's disk guard. Generous beats precise: an
 #: overestimate skips a backend (the next job installs it), an underestimate fills the
-#: disk mid-download and fails the install.
-PREFETCH_GB = {"autorig": 15, "prompt2rig": 75, "pixal3d": 12, "hi3d": 35,
-               "hunyuan_cuda": 18, "trellis_cuda": 18, "qwen_image": 12}
+#: disk mid-download and fails the install. prompt2rig is measured, not guessed: its two
+#: trees (the engine and its driver) took 53 + 63 = 116 GB live on 2026-10-28, and the
+#: old 75 guess is exactly what stuffed the disk out from under a hero's Pixal3D install;
+#: qwen_image was measured the same day (13.4 GB of weights + a 0.8 GB build).
+PREFETCH_GB = {"autorig": 15, "prompt2rig": 130, "pixal3d": 12, "hi3d": 35,
+               "hunyuan_cuda": 18, "trellis_cuda": 18, "qwen_image": 16}
 #: The order the prefetch installs the *other* backends in: the Animate pair first (a
 #: described motion is what a rig wants next, and a rig what a generation wants), then
 #: Pixal3D (Finish's hero route), then the rest.
@@ -174,8 +177,16 @@ def start_prefetch(session: str, mine: str) -> None:
 
     Only worth it on a session that outlives the job: a session stopped with its job
     takes the installs with it. Best effort — a prefetch that cannot start just means
-    the next step installs the old way.
+    the next step installs the old way. Skipped inside a multi-leg pipeline
+    (``I3L_PIPELINE``, set by the hero route for every child it spawns): the
+    pipeline's next leg owns the VM's remaining disk, and a background install eating
+    it mid-flight is exactly how a hero's Pixal3D install died at 1 GB free
+    (2026-10-28, twice in one day).
     """
+    if os.environ.get("I3L_PIPELINE"):
+        log("prefetch skipped: a multi-leg pipeline is using the VM "
+            "(its next leg needs the disk)")
+        return
     plan = [[backend, BACKENDS[backend]["setup"], PREFETCH_GB[backend]]
             for backend in PREFETCH_ORDER if backend != mine and backend in BACKENDS]
     # The plan rides the argv as JSON — the runner's parser only accepts lists, so a
@@ -282,6 +293,83 @@ INSTALL_LINES = ("error", "  $", "echo", "Cannot", "This installs", "Refusing", 
 INSTALL_SILENCE_SECONDS = 600
 
 
+def restore_from_drive(session: str, backend: str, spec: dict) -> bool:
+    """Bring the backend back from the Google Drive archive, when one is mounted.
+
+    A VM is cattle and its disk dies with it; the Drive archive is the lab's memory
+    (`scripts/colab_archive.py`). Honest and best effort: no Drive mounted, or no
+    archive for this backend, or a restore that fails — each is a quiet "install the
+    old way", and none of them touches the install path.
+    """
+    code = (
+        f"import io, subprocess, sys, threading, time\n"
+        f"script = {REMOTE_ROOT + '/scripts/colab_archive.py'!r}\n"
+        f"argv = [sys.executable, script, 'restore', {backend!r}, '--yes']\n"
+        f"p = subprocess.Popen(argv, cwd={REMOTE_ROOT!r},\n"
+        f"                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)\n"
+        f"chunks = []\n"
+        f"stream = io.TextIOWrapper(p.stdout, errors='replace')\n"
+        f"def relay():\n"
+        f"    for line in stream:\n"
+        f"        chunks.append(line)\n"
+        f"        if line.startswith(('[archive]', 'RESTORE_EXIT')):\n"
+        f"            print(line, end='', flush=True)\n"
+        f"    p.wait()\n"
+        f"def beat():\n"
+        f"    while p.poll() is None:\n"
+        f"        print('INSTALL_BEAT', int(time.time()), flush=True)\n"
+        f"        time.sleep(30)\n"
+        f"threading.Thread(target=beat, daemon=True).start()\n"
+        f"relay()\n"
+        f"print('RESTORE_EXIT', p.returncode)\n"
+    )
+    started = time.time()
+
+    def live(chunk: str) -> None:
+        for text in chunk.splitlines():
+            if text.startswith("[archive]"):
+                emit(text)
+
+    try:
+        output = colab.run(["exec", "-s", session, "--timeout", "1800"],
+                           stdin=code, timeout=2100, attempts=1,
+                           silence_seconds=INSTALL_SILENCE_SECONDS, on_output=live)
+    except colab.ColabError as exc:
+        log(f"the Google Drive restore could not run ({str(exc).splitlines()[-1]}); "
+            f"installing the old way")
+        return False
+    if "RESTORE_EXIT 0" in output:
+        log(f"{spec['label']} restored from Google Drive "
+            f"({time.time() - started:.0f}s) instead of re-downloading")
+        return True
+    return False
+
+
+def archive_to_drive(session: str, backend: str) -> None:
+    """Copy the just-finished install to the Google Drive archive, in the background.
+
+    Detached like the prefetch: the next legs need the VM, the archive needs only its
+    idle minutes. A Drive that is not mounted, or room the VM cannot spare, is said in
+    drive-archive.log and costs nothing (the archiver refuses quietly, never fails a
+    job for lack of a place to copy itself).
+    """
+    code = (
+        "import subprocess, sys\n"
+        f"argv = [sys.executable, {REMOTE_ROOT + '/scripts/colab_archive.py'!r},\n"
+        f"        'archive', {backend!r}]\n"
+        f"log = open({REMOTE_ROOT + '/drive-archive.log'!r}, 'a')\n"
+        "print('--- archiving to Google Drive ---', file=log, flush=True)\n"
+        "subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, "
+        "start_new_session=True)\n"
+    )
+    try:
+        colab.run(["exec", "-s", session, "--timeout", "60"], stdin=code, timeout=180)
+        log(f"archiving {backend} to Google Drive in the background (a fresh VM "
+            f"restores it instead of re-downloading)")
+    except colab.ColabError:
+        log("the Google Drive archive could not start; the next VM installs the old way")
+
+
 def ensure_remote_setup(session: str, backend: str, *, skip: bool) -> None:
     """Install the backend on the VM once per session."""
     spec = BACKENDS[backend]
@@ -295,6 +383,9 @@ def ensure_remote_setup(session: str, backend: str, *, skip: bool) -> None:
     )
     if "STAMP" in probe:
         log(f"{spec['label']} is already installed on this VM")
+        return
+
+    if restore_from_drive(session, backend, spec):
         return
 
     log(f"installing {spec['label']} on the VM (first run on this session takes a while)")
@@ -369,6 +460,7 @@ def ensure_remote_setup(session: str, backend: str, *, skip: bool) -> None:
         )
     colab.run(["exec", "-s", session, "--timeout", "60"], attempts=3,
               stdin=f"open({stamp!r}, 'w').write('ok')", timeout=180)
+    archive_to_drive(session, backend)
 
 
 def launch_remote_job(session: str, backend: str, image_remote: str,
