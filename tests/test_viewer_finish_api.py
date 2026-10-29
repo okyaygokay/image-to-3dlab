@@ -137,6 +137,30 @@ def test_stage_lines_become_progress_events():
     assert event["overall_pct"] == pytest.approx(5.0)
 
 
+def test_a_hero_legs_quiet_livesigns_become_message_events():
+    """A first-run VM install is minutes of quiet; without its beats the panel reads
+    "Finishing the body · 0:30" and looks wedged while the run is fine (found live,
+    2026-10-29). The livesigns stream as message-only events — no install's beat is
+    allowed to move a stage's bar, and a leg's command lines stay in the log."""
+    finish = _load()
+    tracker = finish.FinishProgress(["body"], clock=lambda: 1.0)
+    tracker.feed("I2L_STAGE::body::Finishing the body")
+    event = tracker.feed("[hero    380s] [install 2m] still working on the VM")
+    assert event and event["message"] == "[install 2m] still working on the VM"
+    assert "stage_pct" not in event
+    assert tracker.feed("[hero    381s] $ /usr/local/bin/blender --background") is None
+
+
+def test_the_leg_lines_streamed_are_exactly_the_ones_the_panel_shows():
+    """hero_route streams LEG_LINES through its `say`; FinishProgress matches the same
+    tuple. One test holds the two together, so a line added on one side cannot
+    silently miss the other."""
+    finish = _load()
+    from scripts import hero_route
+
+    assert hero_route.LEG_LINES == finish.LEG_LINES
+
+
 def test_the_bands_cover_exactly_the_stages_that_will_run():
     full = finish.stage_bands(["retopologise", "repaint", "compress"])
     assert full["retopologise"][0] == 0.0

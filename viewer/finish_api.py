@@ -430,6 +430,16 @@ def remaining_seconds(elapsed: float, fraction: float) -> float | None:
     return round(elapsed * (1.0 - fraction) / fraction, 1)
 
 
+#: A hero leg's livesigns, exactly `hero_route.LEG_LINES` (a test holds the two
+#: together). `[hero  123s] [install 2m] still working on the VM` becomes a
+#: message-only event: the person watching learns the run is alive, and no install's
+#: beat is allowed to move a stage's bar.
+LEG_NOTE = re.compile(r"\[hero\s+\d+s\] (?P<note>.+)")
+LEG_LINES = ("[install", "[archive]", "[repaint]", "restored from Google Drive",
+             "Google Drive is not mounted", "still working on the VM", "wrote ",
+             "session '", "prefetch ", "SETUP_EXIT", "PREFETCH_EXIT")
+
+
 class FinishProgress:
     """Turn one line of worker stdout into a progress event, or None.
 
@@ -463,6 +473,9 @@ class FinishProgress:
             self.stage_started = self.clock()
             self.stage_fraction = 0.0
             return self._event(message)
+        leg = LEG_NOTE.match(line)
+        if leg and leg.group("note").startswith(LEG_LINES):
+            return self._event(leg.group("note"))
         if self.phase != "repaint":
             return None
         match = PAINT_STEP.match(line)

@@ -137,6 +137,28 @@ def test_a_step_that_works_prints_nothing_of_its_own(capsys, tmp_path):
     assert "quiet" not in capsys.readouterr().out.splitlines()   # the $ line names it; output does not
 
 
+def test_a_legs_quiet_livesigns_reach_the_studio_and_the_log_keeps_everything(
+        capsys, tmp_path):
+    """A first-run install on the VM is minutes of quiet: without its beats on stdout,
+    the studio's panel sat on "Finishing the body · 0:30" for six straight minutes and
+    looked wedged while the install worked fine (found live, 2026-10-29, on a warrior
+    hero). The livesigns stream; the noise stays log-only, and each line lands in
+    run.log exactly once."""
+    script = ("print('[install 1m] still working on the VM')\n"
+              "print('  $ uv pip install ' + 'torch')\n"
+              "print('restored from Google Drive (3.7 GB gz, 21s)')\n"
+              "print('wrote /tmp/back.png')\n")
+    run = hero_route.Run(tmp_path)
+    assert run.run([sys.executable, "-u", "-c", script]) is True
+    out = capsys.readouterr().out
+    assert "[install 1m] still working on the VM" in out
+    assert "restored from Google Drive" in out
+    assert "wrote /tmp/back.png" in out
+    assert "uv pip install torch" not in out           # the noise stays in run.log
+    logged = (tmp_path / "run.log").read_text()
+    assert logged.count("uv pip install torch") == 1   # once, not twice
+
+
 def test_a_step_that_works_on_its_second_try_prints_nothing_of_its_own(capsys, tmp_path):
     import sys
 

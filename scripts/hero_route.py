@@ -56,6 +56,16 @@ BODY_FACES = 32000
 HEAD_FACES = 16000
 #: How much of a failed step's own output is echoed, so a bug report carries the real error.
 FAIL_TAIL_LINES = 15
+
+#: Lines from a leg worth saying out loud while it runs. A first-run install on the VM
+#: is minutes of quiet otherwise — the studio's panel sat on "Finishing the body · 0:30"
+#: for six straight minutes while the install worked fine, indistinguishable from a
+#: wedged run (found live, 2026-10-29, on a warrior hero). Held in step with
+#: `viewer/finish_api.py`'s copy by a test, so a line added here cannot silently miss
+#: the panel.
+LEG_LINES = ("[install", "[archive]", "[repaint]", "restored from Google Drive",
+             "Google Drive is not mounted", "still working on the VM", "wrote ",
+             "session '", "prefetch ", "SETUP_EXIT", "PREFETCH_EXIT")
 SEED = 42
 #: Finish settings shared with the studio's defaults, Pixel Match only (no repaint).
 FINISH_FLAGS = ["--atlas", "2048", "--angle", "89.0", "--voxel", "0.004", "--metallic", "0.25",
@@ -107,8 +117,12 @@ class Run:
                                        stderr=subprocess.STDOUT, encoding="utf-8", errors="replace")
             tail: deque[str] = deque(maxlen=FAIL_TAIL_LINES)
             for line in process.stdout:
-                self.log.write(line)
-                tail.append(line.rstrip("\n"))
+                line = line.rstrip("\n")
+                if line.startswith(LEG_LINES):
+                    self.say(line)          # live to the studio, not only run.log
+                else:
+                    self.log.write(line + "\n")
+                tail.append(line)
             if not process.wait():
                 return True
             if attempt < tries:
