@@ -20,6 +20,18 @@ def test_missing_parts_names_only_what_is_absent(tmp_path):
     assert hero_route.missing_parts({"Pixal3D": present}) == []
 
 
+def test_a_degenerate_rig_is_refused_before_the_head_is_built():
+    """Seen live (2026-10-29): SkinTokens returned one joint, 'bone_0', every body vertex
+    landed in the one "head" region, and the route cropped the whole 1254 px picture as
+    the head -- a model of the whole warrior grafted where the head belongs. Both shapes
+    of that failure stop the route now, while the body is still cheap to keep."""
+    from image_to_3dlab import hero
+
+    assert hero.crop_problem([4], 0.12) is None          # a head-sized region: fine
+    assert "no head bones" in hero.crop_problem([], 0.0)
+    assert "not a head" in hero.crop_problem([0], 1.0)
+
+
 def test_stage_prints_the_marker_the_studio_reads(capsys, tmp_path):
     class Run:
         log = io.StringIO()

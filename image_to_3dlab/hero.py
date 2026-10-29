@@ -26,6 +26,7 @@ GREY_TOLERANCE = 25
 CROP_PAD = 1.3            # crop side vs the head's own size, so hair and ears fit
 CROP_DROP = 0.05          # shift the crop down a little: chin and neck matter more than air
 HEAD_FLOOR_PERCENTILE = 5
+HEAD_SHARE_MAX = 0.5    # more of the body than this in the "head" region and it is not a head
 OUTLINE_GROW_PX = 4       # the least margin round the real head's outline
 OUTLINE_GROW_SHARE = 0.1  # else a tenth of the head's width
 LINER_SHRINK = 0.04       # the body's own head, kept as a liner under the new hair, shrinks this much
@@ -117,6 +118,28 @@ def head_bones(bone: np.ndarray, heights: np.ndarray) -> list[int]:
     top = max(middle, key=middle.get)
     floor = np.percentile(heights[bone == top], HEAD_FLOOR_PERCENTILE)
     return sorted(b for b, m in middle.items() if m >= floor)
+
+
+def crop_problem(picked: list[int], share: float) -> str | None:
+    """Why the located head cannot be trusted, or None when it can.
+
+    Seen live (2026-10-29): SkinTokens' rig degenerated to one joint, 'bone_0', on a
+    mesh another VM rigged fine the same morning -- and every body vertex landed in the
+    one "head" region, so the crop came back the whole 1254 px picture and the route
+    grafted a model of the whole warrior where the head belongs. The share of the body
+    sitting in the picked regions is the mesh's own testimony, so both shapes of the
+    failure are caught however the rig is labelled: no head bones at all, or a "head"
+    holding half the body. The caller stops the run; the body is kept, and the rigger
+    rolls again next run.
+    """
+    if not picked:
+        return ("the throwaway rig has no head bones, so the head cannot be located; "
+                "the body is kept -- run the hero again and the rigger rolls again")
+    if share > HEAD_SHARE_MAX:
+        return (f"the head region holds {share:.0%} of the body's vertices, so the crop "
+                "would be the body, not a head -- the throwaway rig degenerated; the body "
+                "is kept: run the hero again and the rigger rolls again")
+    return None
 
 
 def neck_height(heights: np.ndarray, xs: np.ndarray, slices: int = 30) -> float | None:

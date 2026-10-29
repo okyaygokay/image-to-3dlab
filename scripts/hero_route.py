@@ -674,6 +674,12 @@ def main() -> int:
     px, py = hero.project(body_mesh.vertices[np.isin(bone, picked)], hero.frame(body_mesh.vertices, full_box))
     crop = hero.crop_box(px, py, cut.width, cut.height)
     run.say(f"head bones {picked}, crop box {crop} ({crop[2] - crop[0]} px)")
+    # The degenerate rig that shipped a whole-body "head" (2026-10-29) exited 0 and said
+    # nothing; the share of the body in the picked regions is what betrays it.
+    problem = hero.crop_problem(picked, float(np.isin(bone, picked).mean()))
+    if problem:
+        run.flag(problem)
+        raise SystemExit(f"[hero] {problem}")
     if crop[2] - crop[0] < 48:
         run.flag(f"the head is only {crop[2] - crop[0]} px wide in the picture: the crop holds little detail")
     crop_raw, crop_up = out / "head_crop_raw.png", out / "head_crop.png"
