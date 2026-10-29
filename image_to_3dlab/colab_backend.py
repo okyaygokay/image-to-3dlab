@@ -325,6 +325,7 @@ def run(args: list[str], *, timeout: float = 180, stdin: str | None = None,
     transient = re.compile(
         r"Connection aborted|ConnectionResetError|BrokenPipeError|Broken pipe|"
         r"Connection reset by peer|Read timed out|ReadTimeout|RemoteDisconnected|"
+        r"Connection broken|IncompleteRead|"
         r"urllib3\.util\.retry|NewConnectionError|Failed to establish a new connection",
         re.IGNORECASE)
     last = ""

@@ -273,6 +273,37 @@ def test_a_network_blip_on_a_transfer_is_retried_not_fatal(monkeypatch):
     assert calls["n"] == 2
 
 
+def test_a_download_dying_mid_stream_is_retried_not_fatal(monkeypatch):
+    """A download that dies 2.2 MB short printed 'Connection broken: IncompleteRead(...)'
+    — words the transient list did not know, so attempts=3 never fired and an
+    80-minute hero run lost its head dump to one flaky read (found live, 2026-10-29:
+    66,648,328 of 68,875,439 bytes came back fine)."""
+    calls = {"n": 0}
+
+    class Blip:
+        returncode = 1
+        stdout = ""
+        stderr = ("[colab] Download failed: ('Connection broken: "
+                  "IncompleteRead(66648328 bytes read, 2226911 more expected)', "
+                  "IncompleteRead(66648328 bytes read, 2226911 more expected))")
+
+    class Ok:
+        returncode = 0
+        stdout = "downloaded"
+        stderr = ""
+
+    def flaky(*_args, **_kwargs):
+        calls["n"] += 1
+        return Blip() if calls["n"] == 1 else Ok()
+
+    monkeypatch.setattr(cb.shutil, "which", lambda name: "/usr/bin/colab")
+    monkeypatch.setattr(cb.subprocess, "run", flaky)
+    monkeypatch.setattr(cb.time, "sleep", lambda _s: None)
+    assert cb.run(["download", "head.post.bin", "l", "-s", "s"], timeout=1,
+                  attempts=3) == "downloaded"
+    assert calls["n"] == 2
+
+
 def test_a_command_that_ran_and_failed_is_not_rerun(monkeypatch):
     """Only the CLI's own transport words earn a retry. An exec whose code failed has
     already made its side effects; running it again would repeat them."""
