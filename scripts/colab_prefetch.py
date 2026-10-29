@@ -10,7 +10,9 @@ skipped or failed install only means the next job pays the install itself.
 
 Rules, in order:
 
-* a stamp (`.setup-<backend>-stamp`) says a backend is already installed;
+* a stamp (`.setup-<backend>-stamp`) says a backend is already installed, and a
+  successful install writes one — the stamp is what the next job looks for — then
+  copies itself to the Google Drive archive when one is mounted (best effort);
 * free disk must cover the estimate plus `HEADROOM_GB`;
 * an install of `HEAVY_GB` or more waits until no lab job is running — big installs
   touch the GPU (H3's components are quantized as they download), and the job owns it;
@@ -70,6 +72,27 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+def archive(backend: str, root: Path) -> None:
+    """Copy a finished install to the Google Drive archive (`scripts/colab_archive.py`).
+
+    Without this hook only the backend a job happened to install itself ever reached
+    the Drive — everything the prefetch filled the disk with was re-downloaded by the
+    next VM anyway (found while wiring the prefetch into the archive, 2026-10-29).
+    Best effort like everything here: no Drive mounted, no room, or a backend whose
+    pieces are not named — the archiver says so in prefetch.log and the next VM
+    simply installs the old way.
+    """
+    script = root / "scripts" / "colab_archive.py"
+    if not script.is_file():
+        print(f"{backend}: the archiver is not on this VM; nothing archived", flush=True)
+        return
+    finished = subprocess.run([sys.executable, str(script), "archive", backend,
+                               "--root", str(root)],
+                              capture_output=True, text=True, check=False)
+    for line in ((finished.stdout or "") + (finished.stderr or "")).splitlines():
+        print(line, flush=True)
+
+
 def install(plan: list, root: Path, *, sleep=time.sleep, now=None) -> list[tuple[str, int]]:
     """Run the plan under the rules above; returns (backend, exit code) per install."""
     done = []
@@ -94,6 +117,14 @@ def install(plan: list, root: Path, *, sleep=time.sleep, now=None) -> list[tuple
         if tail.strip():
             print(tail, flush=True)
         print(f"PREFETCH_EXIT {backend} {finished.returncode}", flush=True)
+        if finished.returncode == 0:
+            # What the wrapper does after its own installs, and for the same reasons:
+            # the stamp is what tells the next job this backend is already here (the
+            # prefetch never stamped, so the wrapper re-installed the whole backend on
+            # top of a finished one — found live, 2026-10-29), and the archive keeps
+            # the install on Google Drive for VMs yet to come.
+            (root / f".setup-{backend}-stamp").write_text("ok", encoding="utf-8")
+            archive(backend, root)
         done.append((backend, finished.returncode))
     return done
 

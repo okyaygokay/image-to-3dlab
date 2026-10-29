@@ -21,6 +21,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and mmapped weights do not survive it): the tarball is the store, the local disk is
   the runtime. The Drive mounts from the studio's VM panel, whose consent link and
   continue button walk the one browser click Google asks for.
+- **The prefetch stamps and archives its installs like the wrapper's own.** The
+  background installer never wrote the install stamp, so the next job re-installed a
+  whole backend on top of the one the prefetch had just finished — double installs,
+  part of how a VM's disk filled twice in one day (2026-10-28) — and nothing it
+  installed ever reached the Google Drive archive. A prefetch install that succeeds
+  now writes the stamp and copies itself to the Drive (best effort, like everything
+  the prefetch does), and the last two backends without archive pieces (Hunyuan,
+  TRELLIS) are named from their bootstraps, so every backend the wrapper can install
+  is covered.
+- **A Hero leg's quiet minutes are visible in the panel.** The first run on a fresh
+  VM installs its backend for minutes with nothing to say, and the panel sat on
+  "Finishing the body · 0:30" the whole time — indistinguishable from a wedged run
+  (found live, 2026-10-29, on a warrior hero that was working fine). The leg's
+  livesigns — an install's beats, a Drive restore, a view landing — now stream into
+  the panel as they happen, message-only: they tell the person the run is alive
+  without moving any stage's bar.
 - **A GPU VM console in the studio: Python on the rented machine, no terminal.** Every
   route runs one worked-out thing; the VM button in the header is for everything else —
   "how much disk is left?", "is Drive mounted?", a quick look at anything. The code runs

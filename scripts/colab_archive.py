@@ -49,10 +49,11 @@ HEADROOM_GB = 30
 
 #: What each backend's install consists of, as paths relative to ``BASE``: the vendor
 #: trees the bootstraps build (weights land inside them — the HF cache keeps only
-#: metadata stubs, verified live 2026-10-29), and the stamp is added by the code.
-#: qwen_image's entry is verified against a live install; the rest are read off their
-#: bootstraps and the du of a stuffed VM — a wrong entry fails safe: the restore
-#: refuses, the install runs.
+#: metadata stubs, verified live 2026-10-29; hunyuan's bootstrap puts its 8 GB of
+#: shape weights there by design), and the stamp is added by the code. Every backend
+#: the wrapper can install is named (entries read off their bootstraps, the live VM's
+#: du where one was at hand) — a wrong entry fails safe: the restore refuses, the
+#: install runs.
 PIECES = {
     "qwen_image": (("content/i2l/vendor/sdcpp",), ()),
     "autorig": (("content/i2l/vendor/SkinTokens",), ()),
@@ -60,6 +61,8 @@ PIECES = {
     "prompt2rig": (("content/i2l/vendor/prompt2rig", "content/i2l/vendor/prompt2rig-driver"), ()),
     "hi3d": (("content/i2l/vendor/hi3d",),
              ("root/.cache/huggingface/hub/models--hi3d-official--Hi3Dv1.0",)),
+    "hunyuan_cuda": (("content/i2l/vendor/hunyuan-cuda",), ()),
+    "trellis_cuda": (("content/i2l/vendor/trellis-cuda",), ()),
 }
 
 

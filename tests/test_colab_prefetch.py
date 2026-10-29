@@ -103,3 +103,43 @@ def test_a_dead_pid_file_is_replaced_and_cleared(tmp_path, monkeypatch):
     assert cp.main(["--plan", str(plan).replace("'", '"'), "--root", str(tmp_path)]) == 0
     assert not (tmp_path / ".prefetch.pid").exists()
     assert ran == [((plan), tmp_path)]
+
+
+def test_a_successful_install_stamps_itself_and_archives_to_the_drive(
+        tmp_path, monkeypatch):
+    """The prefetch used to install and tell no one: no stamp, so the wrapper's next
+    job re-installed the whole backend on top of a finished one (found live,
+    2026-10-29); no archive, so the next VM re-downloaded it too. A success now does
+    what the wrapper does after its own installs: write the stamp, then copy itself
+    to the Drive archive."""
+    archiver = tmp_path / "scripts" / "colab_archive.py"
+    archiver.parent.mkdir(parents=True)
+    archiver.write_text("# the real one is synced beside the plan\n")
+    ran = []
+    monkeypatch.setattr(cp.subprocess, "run", _record(ran))
+    monkeypatch.setattr(cp, "free_gb", lambda root: 200.0)
+    done = cp.install([["autorig", "scripts/bootstrap_autorig_colab.py", 12]], tmp_path)
+    assert done == [("autorig", 0)]
+    assert (tmp_path / ".setup-autorig-stamp").is_file()
+    assert str(ran[-1][1]).endswith("colab_archive.py")
+    assert ran[-1][2] == "archive" and ran[-1][3] == "autorig"
+
+
+def test_a_failed_install_stamps_and_archives_nothing(tmp_path, monkeypatch):
+    """A failed install must not look finished — the stamp is what the next job
+    trusts, and the archive only ever holds complete installs."""
+    archiver = tmp_path / "scripts" / "colab_archive.py"
+    archiver.parent.mkdir(parents=True)
+    archiver.write_text("# the real one is synced beside the plan\n")
+    ran = []
+
+    def _fail(argv, **kwargs):
+        ran.append(argv)
+        return _Finished(returncode=1, out="the download died")
+
+    monkeypatch.setattr(cp.subprocess, "run", _fail)
+    monkeypatch.setattr(cp, "free_gb", lambda root: 200.0)
+    done = cp.install([["autorig", "scripts/bootstrap_autorig_colab.py", 12]], tmp_path)
+    assert done == [("autorig", 1)]
+    assert not (tmp_path / ".setup-autorig-stamp").exists()
+    assert len(ran) == 1                          # the archiver was never asked

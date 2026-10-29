@@ -111,13 +111,12 @@ def test_a_missing_drive_or_archive_is_a_quiet_nothing(lab):
     assert ca.restore("pixal3d", root, drive, yes=True) == 1       # a Drive with nothing on it
 
 
-def test_every_backend_with_a_pieces_table_names_something():
-    """hunyuan_cuda and trellis_cuda are not in the table yet — their pieces were never
-    measured on a live VM, and a guessed entry would archive half an install. Until
-    they are named, they simply re-install the old way on every fresh VM."""
+def test_every_backend_the_wrapper_knows_has_its_pieces_named():
+    """The table covers every backend the wrapper can install — a prefetch or job
+    install of any of them can reach the Drive. Entries read off bootstraps still
+    fail safe: a wrong entry refuses to restore, and the install runs."""
     import colab_generate as cg
     for backend in cg.PREFETCH_ORDER:
-        if backend in ca.PIECES:
-            vendor, hub = ca.PIECES[backend]
-            assert vendor or hub, f"{backend} archives nothing"
-    assert ca.archive("hunyuan_cuda", Path("/tmp"), Path("/tmp")) == 0   # quiet, never an error
+        assert backend in ca.PIECES, f"{backend} has no pieces named"
+        vendor, hub = ca.PIECES[backend]
+        assert vendor or hub, f"{backend} archives nothing"
