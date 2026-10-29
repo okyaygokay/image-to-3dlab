@@ -165,12 +165,25 @@ def restore(backend: str, root: Path, drive: Path, *, yes: bool) -> int:
         return 0
     started = time.time()
     stop = beat(started, f"restoring {backend}")
+    # The stamp goes first: an interrupted restore must never leave the VM looking
+    # installed (found live, 2026-10-29 — a stamp from a half-untarred archive sent the
+    # next job into an install that tripped over the wreckage).
+    stamp.unlink(missing_ok=True)
     try:
         with tarfile.open(target, "r:gz") as tar:
+            # filter="tar" — the fully trusted one — because this archive is the lab's
+            # own, written by this same code: a venv's bin/python is an absolute
+            # symlink to the interpreter it was built on, and the "data" filter
+            # refuses exactly that, aborting the restore partway (found live, same
+            # day). On a python without the filter API, plain extract is the same.
             try:
-                tar.extractall(str(BASE), filter="data")
+                tar.extractall(str(BASE), filter="tar")
             except TypeError:                       # a python without the filter API
                 tar.extractall(str(BASE))
+    except tarfile.TarError as exc:
+        print(f"[archive] the {backend} archive would not unpack ({exc}); "
+              f"installing the old way", file=sys.stderr)
+        return 1
     finally:
         stop.set()
     missing = [p for p in piece_paths(backend) if not (BASE / p).exists()]

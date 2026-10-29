@@ -48,6 +48,11 @@ def lab(tmp_path, monkeypatch):
 
 def test_archive_then_restore_is_a_round_trip(lab):
     root, drive, stamp = lab
+    # A venv-style absolute symlink: the whole point of the trusted "tar" filter —
+    # the "data" filter refused exactly this and aborted the restore partway.
+    bin_dir = root / "content/i2l/vendor/sdcpp/bin"
+    bin_dir.mkdir()
+    (bin_dir / "python").symlink_to("/usr/local/bin/python3.11")
     assert ca.archive("qwen_image", root, drive) == 0
 
     assert (drive / "qwen_image.tar.gz").is_file()
@@ -61,7 +66,21 @@ def test_archive_then_restore_is_a_round_trip(lab):
     assert ca.restore("qwen_image", root, drive, yes=True) == 0
 
     assert (root / "content/i2l/vendor/sdcpp" / "sd-cli").read_bytes().startswith(b"#!/bin/sh")
+    assert (bin_dir / "python").is_symlink()           # the venv's link survived
     assert stamp.is_file()                             # the install looks done again
+
+
+def test_a_corrupt_archive_leaves_no_stamp_behind(lab):
+    """The stamp untars first, so an extraction that dies partway would leave the VM
+    looking installed on top of wreckage (found live, 2026-10-29: the next job's
+    install tripped over the half-untarred venv). The stamp is removed before the
+    untar begins and only ever comes back from a complete, verified restore."""
+    root, drive, stamp = lab
+    stamp.unlink()                                     # the VM was wiped; the archive is bad
+    drive.mkdir(parents=True, exist_ok=True)
+    (drive / "qwen_image.tar.gz").write_bytes(b"not a tarball at all")
+    assert ca.restore("qwen_image", root, drive, yes=True) == 1
+    assert not stamp.exists()
 
 
 def test_a_restore_that_lands_incomplete_refuses_to_stamp(lab):
