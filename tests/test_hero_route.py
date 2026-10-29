@@ -202,24 +202,33 @@ def test_the_colab_mode_builds_supervisor_commands_instead_of_local_ones():
                                                "--faces", "16000", "--atlas", "2048"]
 
 
-def test_the_back_picture_is_drawn_on_whichever_route_runs_qwen():
-    """A foreign body's back is drawn from its front picture — locally by default, on the
-    rented VM in the colab mode — with the provenance and the grey-backdrop reference
-    named so they come back beside the picture."""
+def test_the_angles_nobody_photographed_are_rendered_and_repainted(monkeypatch, tmp_path):
+    """A foreign engine saves no cameras, and the body must still take the picture's
+    pixels: the front photo (cut out — Pixel Match reads the alpha as its matte) is
+    fitted, and the back and sides are rendered from the mesh with the Finish's own
+    Blender, then recoloured by Qwen locally or on the rented VM. Every step is
+    best-effort: a view that fails is dropped, never painted as a grey placeholder."""
     from pathlib import Path
 
-    local = hero_route.back_view_command(False, Path("p.png"), Path("out/drawn-back.png"))
-    assert local[1] == hero_route.BACK_VIEW and local[2:] == [Path("p.png"), Path("out/drawn-back.png")]
+    local = hero_route.repaint_command(False, Path("card.png"), Path("back.png"), (768, 1024))
+    assert local[0] == hero_route.PYTHON and local[1] == hero_route.REPAINT_VIEWS
+    assert local[2:] == [Path("card.png"), Path("back.png"), "--render", "768x1024"]
 
-    remote = hero_route.back_view_command(True, Path("p.png"), Path("out/drawn-back.png"))
+    remote = hero_route.repaint_command(True, Path("card.png"), Path("back.png"), (768, 1024))
     assert remote[remote.index("--backend") + 1] == "qwen_image"
-    assert remote[remote.index("--exec") + 1] == "scripts/make_back_view.py"
-    assert str(remote[remote.index("--exec-input") + 1]) == "p.png"
-    assert str(remote[remote.index("--exec-output") + 1]) == "out/drawn-back.png"
+    assert remote[remote.index("--exec") + 1] == "scripts/repaint_views.py"
+    assert str(remote[remote.index("--exec-input") + 1]) == "card.png"
+    assert str(remote[remote.index("--exec-output") + 1]) == "back.png"
     assert remote[remote.index("--exec-artifacts") + 1:remote.index("--keep")] == [
-        "drawn-back.provenance.json", "drawn-back__reference.png"]
-    assert "--keep" in remote and "--yes" in remote
-    assert remote[remote.index("--") + 1:] == ["{in}", "{out}"]
+        "back.provenance.json"]
+    assert remote[remote.index("--") + 1:] == ["{in}", "{out}", "--render", "768x1024"]
+
+    import retopo_repaint
+
+    monkeypatch.setattr(retopo_repaint, "find_blender", lambda: Path("Blender"))
+    render_cmd = hero_route.render_views_command(Path("body.glb"), Path("views"))
+    assert render_cmd[:4] == [Path("Blender"), "--background", "--python", hero_route.RENDER_VIEWS]
+    assert render_cmd[render_cmd.index("--") + 1:] == [Path("body.glb"), Path("views")]
 
 
 def test_the_blender_legs_follow_the_rigger_not_pixal3d(monkeypatch, tmp_path):
@@ -352,17 +361,21 @@ def test_finish_asks_for_the_route_it_was_given(monkeypatch, tmp_path):
     assert "--keep-mesh" in kept_cmd
 
 
-def test_a_body_with_no_cameras_gets_its_pictures_fitted(monkeypatch, tmp_path):
+def test_a_body_with_no_cameras_gets_pictures_fitted_rendered_and_repainted(
+        monkeypatch, tmp_path):
     """A foreign engine saves no cameras, and the body must still take the picture's
-    pixels: Finish is handed cameras fitted to the mesh — the front alone, or the front
-    and a back picture when one exists — with the fit said out loud in the run. A mesh
-    that cannot even be read falls back to the old behaviour (the body keeps its own
-    texture) instead of sinking the run."""
+    pixels: the front photo is fitted (cut out — Pixel Match reads the alpha as its
+    matte), the back and sides are fitted as synthetic views, rendered from the mesh and
+    repainted, and a view that fails anywhere is dropped from the views rather than
+    painted as a grey placeholder. A mesh that cannot even be read skips Pixel Match
+    (the body keeps its own texture) instead of sinking the run."""
     import json
 
+    import trimesh
     from PIL import Image
 
     from image_to_3dlab import front_view as fv
+    trimesh.creation.box(extents=(1.0, 2.0, 1.0)).export(tmp_path / "body.glb")
 
     # Already-cut-out pictures (an alpha that cuts something), so no matte model is needed.
     for name in ("p.png", "drawn-back.png"):
@@ -370,35 +383,51 @@ def test_a_body_with_no_cameras_gets_its_pictures_fitted(monkeypatch, tmp_path):
         page.paste(Image.new("RGBA", (30, 30), (214, 178, 148, 255)), (35, 35))
         page.save(tmp_path / name)
 
-    calls = []
-    fitted = tmp_path / "body.fitted-views"
-    monkeypatch.setattr(fv, "fit_views",
-                        lambda model, pictures, out: calls.append(pictures) or fitted)
+    runs, commands = [], []
+    monkeypatch.setattr(hero_route, "render_views_command",
+                        lambda model, views: ["render", str(model), str(views)])
+    monkeypatch.setattr(hero_route, "repaint_command",
+                        lambda colab, card, view, size: ["repaint", str(card), str(view)])
+
+    def fake_run(command, **kwargs):
+        commands.append([str(c) for c in command])
+        if command[0] == "repaint" and "right" in command[2]:
+            return False                       # the right side's repaint fails
+        if command[0] == "repaint":
+            Path(command[2]).with_suffix(".painted").write_text("ok")
+        if command[0] == "render":
+            for frame in json.loads((Path(command[2]) / "transforms.json").read_text())["frames"]:
+                if frame.get("render"):
+                    (Path(command[2]) / f"{Path(frame['file_path']).stem}.rendered").write_text("ok")
+        return True
 
     run = hero_route.Run(tmp_path)
-    commands, flags = [], []
-    monkeypatch.setattr(run, "run", lambda command, **_: commands.append([str(c) for c in command]) or True)
-    monkeypatch.setattr(run, "flag", lambda note: flags.append(note))
-    out = tmp_path / "body_out.glb"
-    out.with_suffix(".retopo-repaint.json").write_text(json.dumps({}))
-    hero_route.finish(run, tmp_path / "body.glb", tmp_path / "p.png", None, out, 20000, None)
+    monkeypatch.setattr(run, "run", fake_run)
+    out = tmp_path / "body.glb"
 
-    assert str(fitted) in commands[0]                        # --views <the fitted cameras>
-    assert calls == [[(tmp_path / "p.png", "front")]]        # the front alone, by default
-    assert any("fitted" in note for note in flags)           # and the run says so
+    real_fit = fv.fit_views
 
-    calls.clear()
-    hero_route.finish(run, tmp_path / "body.glb", tmp_path / "p.png", None, out, 20000, None,
-                      back=tmp_path / "drawn-back.png")
-    assert calls == [[(tmp_path / "p.png", "front"), (tmp_path / "drawn-back.png", "back")]]
-    assert any("back" in note for note in flags)             # front and back, when a back exists
+    def fake_fit(model, pictures, fitted, renders=()):
+        runs.append((pictures, renders))
+        return real_fit(model, pictures, fitted, renders=renders)
+
+    monkeypatch.setattr(fv, "fit_views", fake_fit)
+
+    fitted = hero_route.prepare_body_views(run, tmp_path / "body.glb", tmp_path / "p.png",
+                                           None, out)
+    assert fitted is not None and runs[0][0] == [(tmp_path / "p.png", "front")]
+    assert [angle for angle, _w, _h in runs[0][1]] == ["back", "left", "right"]
+
+    meta = json.loads((fitted / "transforms.json").read_text())
+    names = [f["file_path"] for f in meta["frames"]]
+    assert "right.png" not in names                       # the failed repaint was dropped
+    assert "p.png" in names and "back.png" in names and "left.png" in names
+    assert (out.with_suffix(".views.done")).is_file()      # the step will not run again
 
     def boom(*_a, **_k):
         raise ValueError("not a glb")
 
     monkeypatch.setattr(fv, "fit_views", boom)
-    commands.clear()
-    hero_route.finish(run, tmp_path / "body.glb", tmp_path / "p.png", None, out, 20000, None)
-    assert not any(str(fitted) in c for c in commands)       # no camera → classic, body keeps its texture
-    assert not (tmp_path / "out.glb").exists()               # and nothing else broke
+    assert hero_route.prepare_body_views(run, tmp_path / "body.glb", tmp_path / "p.png",
+                                         None, tmp_path / "other.glb") is None
 

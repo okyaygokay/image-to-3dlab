@@ -55,6 +55,8 @@ game-ready LODs), start with [the prop sheet guide](../docs/prop-sheets.md).
 | `hero_blender.py` | Join a grafted head and body into one object, render a check sheet, or render one full-body still, in a background Blender. |
 | `upscale_esrgan.py` | Upscale a picture 4x with Real-ESRGAN, then resize it to a square of SIZE pixels. |
 | `make_back_view.py` | Draw the back of a subject from its front picture, for a front + back 3D build. |
+| `render_views.py` | Render a mesh through the fitted cameras nobody photographed, for repainting. |
+| `repaint_views.py` | Recolour one fitted render with Qwen in edit mode, from its reference card. |
 | `trellis_space_generate.py` | Full image -> GLB generation through the CLEAN `trellis-space-mac` port on Apple Silicon. |
 | `trellis_cuda_generate.py` | Full image -> GLB generation through Microsoft's own TRELLIS.2 on an NVIDIA card. |
 | `trellis_rocm_generate.py` | Full image -> GLB generation through Microsoft's own TRELLIS.2 on an AMD card. |

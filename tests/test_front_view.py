@@ -171,3 +171,30 @@ def test_the_back_camera_walks_round_the_model_rather_than_mirroring_it(tmp_path
     assert (fdepth > 0).all() and (bdepth > 0).all()       # both cameras see it
     assert fx[0] > 200                                     # front: picture-right of centre
     assert bx[0] < 200                                     # back: picture-left of centre
+
+
+def test_a_synthetic_view_frames_generously_so_a_tpose_side_never_clips(tmp_path):
+    """A synthetic view's framing is ours to choose, so the limiting axis fills its box
+    and the other leaves margin. A T-pose seen side-on is thin and tall; a compromise
+    focal (the picture fit's rule) zoomed its height out of the frame (2026-10-28)."""
+    import trimesh
+
+    # A T-pose's proportions: wide, thin, tall.
+    model = tmp_path / "tpose.glb"
+    trimesh.util.concatenate([
+        trimesh.creation.box(extents=(2.0, 3.0, 0.4)),      # the body, thin
+        trimesh.creation.box(extents=(2.4, 0.3, 0.3)),      # the arms, wide
+    ]).apply_translation([0, 1.5, 0]).export(model)
+
+    fitted = front_view.fit_views(model, [], tmp_path / "views",
+                                  renders=[("left", 400, 800)])
+    view = pp.load_views(fitted)[0][0]
+    scene = trimesh.load(model, force="scene", process=False)
+    lo, hi = np.asarray(scene.bounds)
+    corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
+                        for z in (lo[2], hi[2])], dtype=np.float64)
+    x, y, depth = pp.project(pp.to_view_space(corners), view)
+    assert (depth > 0).all()
+    assert (x >= 0).all() and (x <= 400).all()             # nothing clips on either axis
+    assert (y >= 0).all() and (y <= 800).all()
+    assert (y.max() - y.min()) > 700                       # the tall axis still fills its box

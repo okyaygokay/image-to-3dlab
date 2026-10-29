@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import struct
 import subprocess
@@ -46,7 +47,8 @@ PYTHON = Path(sys.executable)
 GENERATE = REPO / "scripts" / "pixal3d_generate.py"
 FINISH = REPO / "scripts" / "retopo_repaint.py"
 UPSCALE = REPO / "scripts" / "upscale_esrgan.py"
-BACK_VIEW = REPO / "scripts" / "make_back_view.py"
+RENDER_VIEWS = REPO / "scripts" / "render_views.py"
+REPAINT_VIEWS = REPO / "scripts" / "repaint_views.py"
 COLAB = REPO / "scripts" / "colab_generate.py"
 BLENDER = REPO / "scripts" / "hero_blender.py"
 COMPRESS = REPO / "scripts" / "compress_glb_textures.py"
@@ -251,20 +253,26 @@ def upscale_command(colab: bool, crop: Path, upscaled: Path, size: int = 1024) -
             "--", "{in}", "{out}", "--size", str(size)]
 
 
-def back_view_command(colab: bool, front: Path, back: Path) -> list[str]:
-    """The body's back picture: drawn from the front by Qwen in edit mode, here or on the VM.
+def render_views_command(source: Path, views_dir: Path) -> list[str]:
+    """Render the mesh through the fitted cameras nobody photographed — local Blender,
+    the same one the Finish uses; a mesh operation this small never needs the rented GPU."""
+    import retopo_repaint
 
-    A back is what a *foreign* body (Hi3D, TRELLIS, ...) paints its back with — the
-    engine's own texture stops at the front where the real picture takes over, and a
-    mirrored smear is not a back. Drawn at the tested seed; the provenance and the
-    grey-backdrop reference land beside the picture either way.
-    """
+    return [retopo_repaint.find_blender(), "--background", "--python", RENDER_VIEWS,
+            "--", source, views_dir]
+
+
+def repaint_command(colab: bool, card: Path, view: Path, render_size: tuple[int, int]) -> list[str]:
+    """Recolour one render with Qwen in edit mode: locally with the repo's weights, or
+    as the `qwen_image` backend's `--exec` worker on the rented VM. The card carries
+    everything the worker needs but the render's size, which says where its strip ends."""
+    common = ["--render", f"{render_size[0]}x{render_size[1]}"]
     if not colab:
-        return [PYTHON, BACK_VIEW, front, back]
-    return [PYTHON, "-u", COLAB, "--backend", "qwen_image", "--exec", "scripts/make_back_view.py",
-            "--exec-input", front, "--exec-output", back,
-            "--exec-artifacts", f"{back.stem}.provenance.json", f"{back.stem}__reference.png",
-            "--keep", "--yes", "--", "{in}", "{out}"]
+        return [PYTHON, REPAINT_VIEWS, card, view, *common]
+    return [PYTHON, "-u", COLAB, "--backend", "qwen_image", "--exec", "scripts/repaint_views.py",
+            "--exec-input", card, "--exec-output", view,
+            "--exec-artifacts", f"{view.stem}.provenance.json",
+            "--keep", "--yes", "--", "{in}", "{out}", *common]
 
 
 #: The shots the check renders beside its first one (hero_blender names them itself).
@@ -311,22 +319,20 @@ def replay_command(colab: bool, dump: Path, output: Path, faces: int, atlas: int
 
 
 def finish(run: Run, model: Path, picture: Path, views: Path | None, out: Path, faces: int,
-           dump: Path | None, classic: bool = False, back: Path | None = None) -> None:
+           dump: Path | None, classic: bool = False) -> None:
     """Finish one model: retopo to FACES, and Pixel Match when a camera exists for it.
 
-    `views` is None for a body from another engine (no .svviews behind it): cameras are
-    then fitted to the body so Pixel Match still paints it — the front from the picture,
-    and the back too when `back` names one (drawn or supplied). The head's calls always
-    bring their own views, so None can only mean a foreign body, and they pass no back:
-    the head crop has no back to draw. `dump` is None when the body is not a Pixal3D
-    model: the clean-up is the classic route — which a *bare* foreign body (Hi3D, no UVs,
-    no paint) needs anyway, `classic` or not, and main() passes it explicitly so the
-    resurface is said in the run. A Pixal3D body whose dump was lost still keeps its mesh
-    (--keep-mesh), as before. `classic` forces the classic clean-up even on a Pixal3D
-    model — the head's fallback when post-replay fails.
+    `views` is the body's pictures-and-cameras directory: a Pixal3D body's own
+    ``.svviews``, or the fitted views `prepare_body_views` made for a foreign body
+    (None when even fitting failed: no photo stage, the model keeps its own texture).
+    The head's calls always bring the head run's own views. `dump` is None when the
+    body is not a Pixal3D model: the clean-up is the classic route — which a *bare*
+    foreign body (Hi3D, no UVs, no paint) needs anyway, `classic` or not, and main()
+    passes it explicitly so the resurface is said in the run. A Pixal3D body whose dump
+    was lost still keeps its mesh (--keep-mesh), as before. `classic` forces the
+    classic clean-up even on a Pixal3D model — the head's fallback when post-replay
+    fails.
     """
-    if views is None:
-        views = fitted_body_views(run, model, picture, back, out)
     command = [PYTHON, "-u", FINISH, model, picture, out, "--steps-dir", out.with_suffix(".steps"),
                "--faces", str(faces), *FINISH_FLAGS]
     if views is not None:
@@ -343,37 +349,85 @@ def finish(run: Run, model: Path, picture: Path, views: Path | None, out: Path, 
                  "objected; see run.log): hair and thin parts can shatter")
 
 
-def fitted_body_views(run: Run, model: Path, picture: Path, back: Path | None,
-                      out: Path) -> Path | None:
-    """Cameras for a body whose maker saved none, or None when even fitting fails.
+#: The canvas the angles nobody photographed are rendered at: portrait, like the
+#: pictures themselves, and a size the edit returns unscaled.
+RENDER_SIZE = (768, 1024)
 
-    One camera per picture — the front always, the back when one exists (drawn by Qwen
-    from the front, or supplied) — so Pixel Match paints the front from the real photo
-    and the back from the back picture, the same "on (front + back)" a two-view Pixal3D
-    run gets. Each picture is cut out first unless it already is: a maker's view
-    pictures are cut-outs, and Pixel Match reads the alpha as its matte — an opaque
-    picture would paint its background (near-black, drawn grey) wherever the mesh
-    projects past the figure. The body keeps its own texture when even fitting fails,
-    as before. `finish` is the only caller, and the head never reaches here: its two
-    calls always bring the head run's own views.
+#: The side angles every foreign body gets; the back joins them unless a real back
+#: picture was supplied (a real photo beats anything made).
+SIDE_ANGLES = (("left", *RENDER_SIZE), ("right", *RENDER_SIZE))
+
+
+def prepare_body_views(run: Run, model: Path, picture: Path, back: Path | None,
+                       out: Path, colab: bool = False) -> Path | None:
+    """Pictures and fitted cameras for a body whose maker saved none; None if even
+    fitting fails (the body then keeps its own texture, as before).
+
+    The front is the real photo, cut out (Pixel Match reads the alpha as its matte).
+    A supplied back picture joins it the same way. The angles nobody photographed —
+    back (when not supplied) and the two sides — are *rendered from the mesh itself*
+    through their fitted cameras and recoloured by Qwen with the front as the colour
+    reference, so every picture agrees with the geometry underneath: a freely drawn
+    view does not (Qwen invented crossed apron straps on a mesh whose back is a full
+    apron, 2026-10-28). Each step is best-effort: a render or repaint that fails drops
+    its view and the run says so — the front alone still paints.
     """
     from image_to_3dlab.front_view import fit_views
 
-    pictures = [(cutout_picture(run, picture), "front")] + (
-        [(cutout_picture(run, back), "back")] if back else [])
-    try:
-        fitted = fit_views(model, pictures, out.with_suffix(".fitted-views"))
-    except Exception as exc:  # an unreadable mesh must not sink the whole run
-        run.flag(f"could not fit cameras to {model.name} ({exc}); "
-                 f"Pixel Match on the body is skipped")
-        return None
-    run.flag("the body's maker saved no cameras, so " +
-             ("front and back cameras were" if back else "a front camera was") +
-             " fitted to it: Pixel Match paints the " +
-             ("front from the picture and the back from the back picture"
-              if back else "front from the picture") +
-             " (fitted cameras, not the maker's)")
+    front = cutout_picture(run, picture)
+    pictures = [(front, "front")] + ([(cutout_picture(run, back), "back")] if back else [])
+    renders = ([] if back else [("back", *RENDER_SIZE)]) + list(SIDE_ANGLES)
+    fitted = out.with_suffix(".fitted-views")
+    if not (fitted / "transforms.json").is_file():   # never clobber rendered/painted views
+        try:
+            fit_views(model, pictures, fitted, renders=renders)
+        except Exception as exc:  # an unreadable mesh must not sink the whole run
+            run.flag(f"could not fit cameras to {model.name} ({exc}); "
+                     f"Pixel Match on the body is skipped")
+            return None
+    _render_body_views(run, model, fitted, front, colab)
+    out.with_suffix(".views.done").write_text("ok")
+    run.flag("the body's maker saved no cameras, so cameras were fitted to it and the "
+             "angles nobody photographed were rendered from the mesh and repainted: "
+             "Pixel Match paints it from the photo and those (fitted cameras, not the "
+             "maker's)")
     return fitted
+
+
+def _render_body_views(run: Run, model: Path, fitted: Path, front: Path, colab: bool) -> None:
+    """Render the synthetic views with Blender, then recolour each with Qwen. Best-effort:
+    a view whose render or repaint fails is dropped from the views, said in the run."""
+    from PIL import Image
+
+    from image_to_3dlab import repaint_view
+
+    if not run.run(render_views_command(model, fitted), required=False):
+        run.flag("the body's views could not be rendered (see run.log); Pixel Match "
+                 "paints from the pictures that exist")
+    meta = json.loads((fitted / "transforms.json").read_text())
+    for frame in list(meta["frames"]):
+        if not frame.get("render"):
+            continue
+        stem = Path(frame["file_path"]).stem
+        view = fitted / frame["file_path"]
+        if not (fitted / f"{stem}.rendered").is_file():
+            _drop_view(fitted, meta, frame, f"{stem} was not rendered")
+            continue
+        if (fitted / f"{stem}.painted").is_file():
+            continue
+        card = fitted / f"{stem}__card.png"
+        with Image.open(view) as render:
+            repaint_view.reference_card(render, Image.open(front)).save(card)
+        if run.run(repaint_command(colab, card, view, render.size), required=False):
+            (fitted / f"{stem}.painted").write_text("ok")
+            continue
+        _drop_view(fitted, meta, frame, f"{stem} could not be repainted")
+
+
+def _drop_view(fitted: Path, meta: dict, frame: dict, why: str) -> None:
+    meta["frames"] = [f for f in meta["frames"] if f is not frame]
+    (fitted / "transforms.json").write_text(json.dumps(meta, indent=2))
+    print(f"[hero] view dropped: {why}", flush=True)
 
 
 def cutout_picture(run: Run, picture: Path) -> Path:
@@ -456,6 +510,10 @@ def stage_body_inputs(body: Path, views: Path | None, dump: Path | None, record:
 
 
 def main() -> int:
+    # One pipeline, many legs — and each leg's child wrapper reads this: no background
+    # prefetch while the pipeline runs, because an install eating the VM's disk
+    # mid-flight is what killed its Pixal3D leg at 1 GB free (2026-10-28, twice).
+    os.environ["I3L_PIPELINE"] = "1"
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("picture", type=Path)
     parser.add_argument("--back", type=Path, default=None, help="a back view of the same picture")
@@ -548,24 +606,22 @@ def main() -> int:
     body_views = body_raw.with_suffix(".svviews")
     have_views = (body_views / "transforms.json").is_file()
     dump = body_raw.with_suffix(".post.bin")
-    body_back = back
-    if not have_views and body_back is None:
-        # A foreign body paints through fitted cameras — the front from the real
-        # picture, the back from one drawn by Qwen from that photo (a supplied --back
-        # was already used for the build and is reused here). Best-effort: a body whose
-        # back could not be drawn still gets its front painted.
-        body_back = out / "drawn-back.png"
-        if run.step("body: back view", body_back) and not run.run(
-                back_view_command(colab, picture, body_back), required=False):
-            run.flag("the back picture could not be drawn; Pixel Match paints the "
-                     "body's front only (its sides and back keep the engine's texture)")
-        if not body_back.is_file():
-            body_back = None
+    body_views_for_finish = body_views if have_views else None
+    if not have_views:
+        # A foreign body paints through cameras fitted to it: the front from the real
+        # photo; the angles nobody photographed (back unless a real --back was supplied,
+        # and the sides) rendered from the mesh itself and repainted with the photo's
+        # colours — a picture that cannot disagree with the geometry underneath.
+        fitted_dir = body.with_suffix(".fitted-views")
+        if run.step("body: views (fit, render, repaint)", body.with_suffix(".views.done")):
+            prepare_body_views(run, body_raw, picture, back, body, colab)
+        if (fitted_dir / "transforms.json").is_file():
+            body_views_for_finish = fitted_dir
     label = f"body: Finish {args.body_faces}"
     if have_views:
         label += " + Pixel Match"
-    else:  # a foreign body: cameras fitted to it — the front from the photo, the back when drawn
-        label += " + Pixel Match (front" + (" + drawn back" if body_back else "") + ")"
+    elif body_views_for_finish:  # a foreign body: fitted cameras, real photo + repainted views
+        label += " + Pixel Match (front + repainted views)"
     if run.step(label, body):
         # A body this run just built with Pixal3D always has its dump; missing means the
         # build predates the patch, and the classic route would shatter its hair exactly
@@ -573,9 +629,8 @@ def main() -> int:
         # (Hi3D, TRELLIS, ...) has neither file, by design.
         if not args.body and not dump.is_file():
             raise SystemExit(f"[hero] {NO_DUMP}")
-        finish(run, body_raw, picture, body_views if have_views else None, body,
-               args.body_faces, dump if dump.is_file() else None,
-               classic=body_classic, back=body_back)
+        finish(run, body_raw, picture, body_views_for_finish, body,
+               args.body_faces, dump if dump.is_file() else None, classic=body_classic)
 
     # 2. measure
     stage(run, "measure", "Finding the head")
