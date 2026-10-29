@@ -40,7 +40,7 @@ export function closeSheet(stage) {
   el.remove();
 }
 
-function sheet(stage, inner) {
+export function sheet(stage, inner) {
   closeSheet(stage);
   const el = document.createElement('div');
   el.className = 'sheet';
@@ -263,6 +263,7 @@ export const GUIDE = [
   ['Hero face', 'For characters whose face matters. In the Finish step, set Detail to Hero face. The body is finished as usual, then the head is built again from a close, sharper crop of your picture and joined on, so faces get real eyelids instead of goggle eyes. It takes longer than a normal Finish, and needs a model made from a picture. Long hair below the shoulders keeps the body\'s plainer detail. Have a look at the eyes: if a pupil is a dark hole, Fix a spot\'s Fill hole closes it.'],
   ['Fix a spot', 'The brush button in the 3D view, on a finished model. Click to mark spots (size the ring with the slider or [ ]), press Patch to preview, flip Before / After, then Keep (a new version) or Discard. Fill hole cuts out a pocket or dent and patches it smooth: dark pupils, goggle eyes, pits in a beard. Smooth irons out bumps and ridges without cutting (set its strength). Repaint changes paint only, from your picture: scuffs and smears.'],
   ['Open GLB', 'Look at any GLB from your computer, or drop one anywhere on the page. View only: nothing is copied into your Library.'],
+  ['VM', 'The rented GPU machine, from the page: run a line of Python on it (how much disk is left, look at anything), and mount your Google Drive — models archive themselves there, so a new VM restores them instead of re-downloading.'],
   ['News', 'Short notes from us: a new version, AssetFurnace Cloud, a known problem and its fix. A number shows when there is something new; it never pops up.'],
   ['Activity', 'Everything that has run, finished, stopped or failed, with logs when something breaks.'],
   ['Report a bug', 'Tell us what broke. The studio adds the version, your machine and the error; you read it all, then send it through our site, GitHub or Discord.'],

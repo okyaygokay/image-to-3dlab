@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import activity_api
 import backend_catalog
 import bug_report_api
+import colab_console_api
 import fixspot_api
 import hf_api
 import image_api
@@ -3038,6 +3039,21 @@ class Handler(SimpleHTTPRequestHandler):
                        "discard": fixspot_api.discard_response}[parts[2]]
             self._send_json(*fixspot_api.answer(handler, OUTPUT_ROOT, payload))
             return
+        if parts == ["api", "colab", "console"]:
+            self._console_post("exec")
+            return
+        if parts == ["api", "colab", "drive", "mount"]:
+            self._console_post("drivemount")
+            return
+        if parts == ["api", "colab", "drive", "continue"]:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length)) if 0 < length <= 4096 else {}
+            except (ValueError, json.JSONDecodeError):
+                payload = {}
+            sent = colab_console_api.press_enter(str((payload or {}).get("id") or ""))
+            self._send_json(200 if sent else 404, {"sent": sent})
+            return
         if parts == ["api", "blender", "install"]:
             self._start_blender_install()
             return
@@ -3195,6 +3211,22 @@ class Handler(SimpleHTTPRequestHandler):
             self._cancel_image_job(parts[2])
             return
         self.send_error(HTTPStatus.NOT_FOUND)
+
+    def _console_post(self, kind: str) -> None:
+        """Start one console run on the VM: code from the page, or a Drive mount."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if 0 < length <= 128 * 1024 else b""
+            payload = json.loads(raw) if raw else {}
+        except (ValueError, json.JSONDecodeError):
+            self._send_json(422, {"error": 'send JSON: {"code": "print(1)", "timeout": 30}'})
+            return
+        try:
+            self._send_json(202, colab_console_api.start(payload.get("code"),
+                                                         payload.get("timeout") or 30,
+                                                         kind=kind))
+        except ValueError as exc:
+            self._send_json(422, {"error": str(exc)})
 
     def _notices(self) -> dict:
         """The bell's notices: ours from the site, plus a newer release (notices_api)."""
@@ -3546,6 +3578,15 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parts == ["api", "hf", "status"]:
             self._send_json(200, hf_api.status())
+            return
+        if parts == ["api", "colab", "vm"]:
+            self._send_json(200, colab_console_api.vm_status())
+            return
+        if len(parts) == 4 and parts[:3] == ["api", "colab", "console"]:
+            try:
+                self._send_json(200, colab_console_api.read(parts[3]))
+            except ValueError:
+                self._send_json(404, {"error": "no such run"})
             return
         if parts == ["api", "catalog"]:
             self._send_json(200, catalog_payload())

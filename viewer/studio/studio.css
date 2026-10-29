@@ -402,3 +402,20 @@ img.glow { animation: doorglow 2.4s ease-in-out infinite; }
 .usage-notice p { margin: 0; }
 .usage-notice .row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .usage-notice .row > * { font-size: 12px; padding: 3px 9px; }
+
+/* The GPU VM console (pages.js's sheet, driven by console.js): code in, streamed
+   output out. Monospace both ways, and the output pane caps itself so a chatty run
+   scrolls a pane, not the page. */
+.console-card { gap: 12px; }
+.console-code { font: 400 13px/1.5 var(--f-num); min-height: 9rem; }
+.console-code:focus { outline: none; border-color: var(--ember); }
+.console-tools { display: flex; gap: 8px; }
+.console-run { display: flex; align-items: center; gap: 10px; }
+.console-run .primary { padding: 8px 14px; }
+.console-timeout { width: auto; }
+.console-out { margin: 0; padding: 10px 12px; max-height: 40vh; overflow: auto;
+  background: #110d0b; border: 1px solid var(--line); border-radius: 9px;
+  font: 400 12px/1.5 var(--f-num); white-space: pre-wrap; word-break: break-word; }
+.console-consent { display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  padding: 8px 10px; border: 1px solid var(--ember); border-radius: 9px; background: var(--raise); }
+.console-consent a { color: var(--ember); text-decoration: underline; word-break: break-all; }
