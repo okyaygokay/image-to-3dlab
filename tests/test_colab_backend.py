@@ -462,8 +462,40 @@ def test_a_corrupted_download_is_refused_not_shipped(monkeypatch, tmp_path):
             Path(args[2]).write_bytes(b"01234567X")  # one byte wrong in flight
         return ""
     monkeypatch.setattr(cb, "run", lying_vm)
+    monkeypatch.setattr(cb.time, "sleep", lambda _s: None)
     with pytest.raises(cb.ColabError, match="checksum mismatch"):
         cb.download("s", "/o/dump.bin", tmp_path / "dump.bin")
+    downloads = [c for c in calls if c[0][0] == "download"]
+    assert len(downloads) == 3          # two whole retries, then the honest refusal
+
+
+def test_a_truncated_transfer_is_tried_again_whole(monkeypatch, tmp_path):
+    """The CLI's failure wordings are an open set — IncompleteRead one hour, an SSL
+    record layer failure the next (both live on the same 545 MB head dump,
+    2026-10-29) — so a transfer whose checksum says 'short' is simply tried again,
+    whole, whatever the CLI said on the way out. A truncated body that exits zero is
+    the same class of failure as a nonzero one."""
+    calls = {"n": 0}
+    payload = b"0123456789"
+
+    def flaky_vm(args, *, stdin=None, **_kwargs):
+        calls["n"] += 1
+        if args[0] == "exec" and stdin and "getsize" in stdin:
+            import hashlib
+            import re as _re
+            remote = _re.search(r"os\.path\.exists\('([^']+)'\)", stdin).group(1)
+            digest = hashlib.md5(payload).hexdigest()
+            return f"SIZE {len(payload)} {digest}" if remote else "MISSING"
+        if args[0] == "download":
+            Path(args[2]).write_bytes(b"01234567" if calls["n"] == 2 else payload)
+        return ""
+
+    monkeypatch.setattr(cb, "run", flaky_vm)
+    monkeypatch.setattr(cb.time, "sleep", lambda _s: None)
+    local = tmp_path / "dump.bin"
+    cb.download("s", "/o/dump.bin", local)
+    assert local.read_bytes() == payload
+    assert calls["n"] == 3              # probe, the short try, the good try
 
 
 def test_a_probe_that_cannot_be_read_says_so(monkeypatch, tmp_path):

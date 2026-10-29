@@ -120,3 +120,12 @@ def test_every_backend_the_wrapper_knows_has_its_pieces_named():
         assert backend in ca.PIECES, f"{backend} has no pieces named"
         vendor, hub = ca.PIECES[backend]
         assert vendor or hub, f"{backend} archives nothing"
+
+
+def test_autorigs_checkpoints_ride_with_the_vendor_tree():
+    """SkinTokens' two checkpoints are symlinks into the Hugging Face cache (found
+    live, 2026-10-29: an archive without the cache dir restored dangling links and
+    the rig died on torch.load's FileNotFoundError), so the cache is a named piece
+    and a restore without it refuses rather than half-installing."""
+    _vendor, hub = ca.PIECES["autorig"]
+    assert any("models--VAST-AI--SkinTokens" in piece for piece in hub)

@@ -50,13 +50,16 @@ HEADROOM_GB = 30
 #: What each backend's install consists of, as paths relative to ``BASE``: the vendor
 #: trees the bootstraps build (weights land inside them — the HF cache keeps only
 #: metadata stubs, verified live 2026-10-29; hunyuan's bootstrap puts its 8 GB of
-#: shape weights there by design), and the stamp is added by the code. Every backend
-#: the wrapper can install is named (entries read off their bootstraps, the live VM's
-#: du where one was at hand) — a wrong entry fails safe: the restore refuses, the
-#: install runs.
+#: shape weights there by design), and the stamp is added by the code. The exception
+#: is autorig: SkinTokens' two checkpoints are *symlinks into the Hugging Face cache*
+#: (found live, 2026-10-29 — an archive without the cache dir restored dangling links
+#: and the rig died on torch.load's FileNotFoundError), so its cache dir is a piece
+#: too. Every backend the wrapper can install is named — a wrong entry fails safe:
+#: the restore refuses, the install runs.
 PIECES = {
     "qwen_image": (("content/i2l/vendor/sdcpp",), ()),
-    "autorig": (("content/i2l/vendor/SkinTokens",), ()),
+    "autorig": (("content/i2l/vendor/SkinTokens",),
+                ("root/.cache/huggingface/hub/models--VAST-AI--SkinTokens",)),
     "pixal3d": (("content/i2l/vendor/pixal3d-cpp",), ()),
     "prompt2rig": (("content/i2l/vendor/prompt2rig", "content/i2l/vendor/prompt2rig-driver"), ()),
     "hi3d": (("content/i2l/vendor/hi3d",),

@@ -325,7 +325,7 @@ def run(args: list[str], *, timeout: float = 180, stdin: str | None = None,
     transient = re.compile(
         r"Connection aborted|ConnectionResetError|BrokenPipeError|Broken pipe|"
         r"Connection reset by peer|Read timed out|ReadTimeout|RemoteDisconnected|"
-        r"Connection broken|IncompleteRead|"
+        r"Connection broken|IncompleteRead|\[SSL|record layer failure|"
         r"urllib3\.util\.retry|NewConnectionError|Failed to establish a new connection",
         re.IGNORECASE)
     last = ""
@@ -526,9 +526,25 @@ def download(session: str, remote: str, local: Path, *, timeout: float = 600) ->
             raise ColabError(f"{remote} came back wrong after {local.stat().st_size if local.is_file() else 0} "
                              f"of {size} bytes (checksum mismatch)")
 
+    def _attempt(step) -> None:
+        """Two more whole attempts for a transfer that dies mid-stream. The CLI's
+        failure wordings are an open set — IncompleteRead one hour, an SSL record
+        layer failure the next, both live on the same 545 MB head dump (2026-10-29)
+        — so no word list can be complete; the checksum decides, not the wording."""
+        for attempt in (1, 2, 3):
+            try:
+                step()
+                return
+            except ColabError:
+                if attempt == 3:
+                    raise
+                time.sleep(20 * attempt)
+
     if size <= UPLOAD_CHUNK:
-        run(["download", remote, str(local), "-s", session], timeout=timeout, attempts=3)
-        _check()
+        def _whole() -> None:
+            run(["download", remote, str(local), "-s", session], timeout=timeout, attempts=3)
+            _check()
+        _attempt(_whole)
         return
 
     parts = (size + UPLOAD_CHUNK - 1) // UPLOAD_CHUNK
@@ -546,9 +562,10 @@ def download(session: str, remote: str, local: Path, *, timeout: float = 600) ->
     name = remote.rsplit("/", 1)[1]
     with tempfile.TemporaryDirectory(prefix="i2l-dl-") as scratch:
         for index in range(parts):
-            run(["download", f"{remote}.part{index:04d}",
+            _attempt(lambda index=index: run(
+                ["download", f"{remote}.part{index:04d}",
                  str(Path(scratch) / f"{name}.part{index:04d}"), "-s", session],
-                timeout=timeout, attempts=3)
+                timeout=timeout, attempts=3))
         local.parent.mkdir(parents=True, exist_ok=True)
         with local.open("wb") as out:
             for index in range(parts):
